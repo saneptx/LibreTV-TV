@@ -77,17 +77,49 @@ docker compose pull && docker compose up -d
 
 ### 手动运行
 
+使用本地点播源配置 `source.json` 启动（首次运行会自动安装依赖，随后构建并监听 8080）：
+
+```bash
+./start_local.sh
+```
+
+后台运行（关闭终端后继续运行，依赖安装和构建也在后台执行）：
+
+```bash
+./start_local.sh --background
+tail -f start_local.log                 # 查看启动进度和服务日志，Ctrl+C 退出查看
+kill "$(cat .start_local.pid)"          # 服务启动完成后停止服务
+```
+
+后台命令返回表示已创建进程；是否启动成功请查看日志。重复启动会检查 PID，日志在每次后台启动时覆盖。
+
+`start_local.sh` 默认设置 `AUTH_DISABLED=true`，电脑网页、电视 App 和模拟器均免登录，所有能访问该服务的客户端都能使用。恢复密码验证时运行 `AUTH_DISABLED=false PASSWORD=your-password ./start_local.sh`。普通 `npm start` / Docker 部署默认仍开启验证。
+
+也可以分别安装、构建和启动：
+
 ```bash
 npm install
 PASSWORD=your-password npm run build
 PASSWORD=your-password npm start   # 监听 8080
 ```
 
+### Android TV / 投影仪
+
+`android-tv/` 是可侧载到 Android TV、电视盒子和安卓投影仪的 WebView 客户端。先让 LibreTV 服务在电视可访问的局域网设备或服务器上运行，再按该目录的说明构建并安装 APK：
+
+```bash
+cd android-tv
+./gradlew assembleDebug
+```
+
+首次打开 App 时，用遥控器输入服务器地址，例如 `192.168.1.10:8080`；App 会自动打开 `/tv`。按遥控器菜单或设置键可修改地址。完整构建与使用说明见 [Android TV 客户端说明](android-tv/README.md)。
+
 ### 环境变量
 
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
-| `PASSWORD` | 是 | 访问密码；未设置时站点会提示管理员配置 |
+| `PASSWORD` | 开启验证时必填 | 访问密码；开启验证且未设置时站点会提示管理员配置 |
+| `AUTH_DISABLED` | 否 | 仅设为 `true` 时关闭所有客户端的登录验证。普通部署默认关闭此开关，`start_local.sh` 默认开启 |
 | `PROXY_SECRET` | 否 | 会话/代理签名密钥；不设置时从 PASSWORD 派生（多实例部署建议显式设置） |
 | `DEFAULT_SOURCES` | 否 | 预置采集站（JSON 数组），用户端自动出现且默认勾选，详见[配置文档](https://libretv.is-an.org/wiki/Configuration.html) |
 | `REQUEST_TIMEOUT` | 否 | 代理上游请求超时（毫秒），默认 8000 |

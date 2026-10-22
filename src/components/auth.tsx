@@ -56,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then((s) => {
         if (cancelled) return;
         setVerified(s.verified);
-        setSetupRequired(!s.passwordRequired);
+        setSetupRequired(!s.passwordRequired && !s.verified);
         setVersion(s.version);
         setChecked(true);
       })
@@ -141,6 +141,7 @@ function LoginModal({
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -181,6 +182,7 @@ function LoginModal({
       <div
         className="bg-surface-raised rounded-xl p-6 w-full max-w-sm mx-4 shadow-2xl"
         role="dialog"
+        data-tv-auth
         aria-modal="true"
         aria-label={setupRequired ? '需要配置密码' : '访问验证'}
       >
@@ -207,12 +209,18 @@ function LoginModal({
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    submitRef.current?.focus();
+                  }
+                }}
                 className="input w-full"
                 placeholder="密码"
                 autoComplete="current-password"
               />
               {error && <p className="mt-2 text-sm text-danger">{error}</p>}
-              <button type="submit" className="btn-primary w-full mt-4" disabled={loading || !password.trim()}>
+              <button ref={submitRef} type="submit" className="btn-primary w-full mt-4" disabled={loading || !password.trim()}>
                 {loading ? '验证中...' : '进入'}
               </button>
             </form>

@@ -96,6 +96,14 @@ body {
   .btn-ghost {
     @apply btn bg-chip text-muted hover:bg-hover hover:text-content border border-line;
   }
+
+  .tv-watch [data-tv-focus]:focus-visible {
+    position: relative;
+    z-index: 2;
+    outline: 3px solid #62e4ff;
+    outline-offset: 3px;
+    box-shadow: 0 0 0 6px rgba(53, 217, 255, 0.25), 0 0 28px rgba(53, 217, 255, 0.28);
+  }
   .input {
     @apply bg-chip border border-line rounded-md px-3 py-2 text-sm text-content placeholder:text-faint;
     @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:border-accent;

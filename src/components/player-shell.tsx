@@ -6,6 +6,7 @@ import Hls, { type HlsConfig } from 'hls.js';
 
 import { PlaybackRecovery, describeHlsError } from '@/lib/playback-recovery';
 import { createHlsLoader } from '@/lib/hls-loader';
+import { DownloadSpeedMeter } from '@/lib/download-speed';
 import {
   getVideoPrefetcher,
   getNextEpisodePrefetcher,
@@ -29,7 +30,7 @@ import {
  * 重建 <video> 元素，触发「黑屏有声」的渲染竞态。
  */
 
-interface PlayerShellProps {
+export interface PlayerShellProps {
   url: string;
   title: string;
   adFilter: boolean;
@@ -57,6 +58,13 @@ interface PlayerShellProps {
   onNextEpisode?: () => void;
   hasPrevEpisode?: boolean;
   hasNextEpisode?: boolean;
+  /** Android TV 入口：确认键切换播放状态，播放器容器可获得遥控器焦点。 */
+  tvMode?: boolean;
+  /** 电视专用界面复用同一个 video 元素，避免重建解码器和丢失进度。 */
+  onVideoReady?: (video: HTMLVideoElement | null) => void;
+  /** 视频网络请求的实际接收速度（字节/秒），每秒更新，不统计本地分片缓存。 */
+  onDownloadSpeed?: (bytesPerSecond: number) => void;
+  onPlaybackError?: (message: string) => void;
 }
 
 export function PlayerShell({
@@ -77,11 +85,16 @@ export function PlayerShell({
   onNextEpisode,
   hasPrevEpisode,
   hasNextEpisode,
+  tvMode,
+  onVideoReady,
+  onDownloadSpeed,
+  onPlaybackError,
 }: PlayerShellProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const artRef = useRef<any>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const downloadMeterRef = useRef<DownloadSpeedMeter | null>(null);
   const [error, setError] = useState('');
   const [hint, setHint] = useState('');
   // 起播前的品牌占位图（沿用旧版 nomedia 素材），实际开始播放后隐藏
@@ -92,13 +105,17 @@ export function PlayerShell({
   const propsRef = useRef({
     url, title, adFilter, autoplayNext, episodeKey, nextUrl, nextEpisodeKey,
     getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
-    onPrevEpisode, onNextEpisode, hasPrevEpisode, hasNextEpisode,
+    onPrevEpisode, onNextEpisode, hasPrevEpisode, hasNextEpisode, tvMode, onVideoReady, onDownloadSpeed, onPlaybackError,
   });
   propsRef.current = {
     url, title, adFilter, autoplayNext, episodeKey, nextUrl, nextEpisodeKey,
     getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
-    onPrevEpisode, onNextEpisode, hasPrevEpisode, hasNextEpisode,
+    onPrevEpisode, onNextEpisode, hasPrevEpisode, hasNextEpisode, tvMode, onVideoReady, onDownloadSpeed, onPlaybackError,
   };
+
+  useEffect(() => {
+    propsRef.current.onPlaybackError?.(error);
+  }, [error]);
 
   /** 上报实测画质：多次上报取大值由调用方决定，这里只管把拿到的高度传出去 */
   const reportQuality = (height: number) => {
@@ -132,7 +149,7 @@ export function PlayerShell({
   };
 
   // 片段缓存开启时调大 hls.js 自身缓冲，缓冲之外的空窗由预取器补齐
-  const buildHlsConfig = (): Partial<HlsConfig> => {
+  const buildHlsConfig = (meter: DownloadSpeedMeter): Partial<HlsConfig> => {
     const p = propsRef.current;
     const cacheSettings = loadCacheSettings();
     const cacheEnabled = cacheSettings.enabled && !!p.episodeKey;
@@ -149,6 +166,7 @@ export function PlayerShell({
       manifestLoadingMaxRetry: 3,
       manifestLoadingRetryDelay: 1000,
       startLevel: -1,
+      xhrSetup: (xhr) => meter.observe(xhr),
       abrEwmaDefaultEstimate: 500_000,
       appendErrorMaxRetry: 5,
       // 组合 loader：广告过滤（blockAd 随设置）+ 片段缓存命中（cacheEnabled）
@@ -188,8 +206,11 @@ export function PlayerShell({
     restoreCleanupRef.current?.();
     restoreCleanupRef.current = null;
     hlsRef.current?.destroy();
+    const meter = new DownloadSpeedMeter();
+    downloadMeterRef.current = meter;
+    propsRef.current.onDownloadSpeed?.(0);
     currentMediaUrlRef.current = mediaUrl;
-    const hls = new Hls(buildHlsConfig());
+    const hls = new Hls(buildHlsConfig(meter));
     hlsRef.current = hls;
 
     let restoreInFlight = false;
@@ -346,15 +367,15 @@ export function PlayerShell({
       type: 'm3u8',
       volume: 0.8,
       autoplay: true,
-      pip: true,
-      autoMini: true,
-      screenshot: true,
-      setting: true,
-      playbackRate: true,
-      aspectRatio: true,
-      fullscreen: true,
-      fullscreenWeb: true,
-      miniProgressBar: true,
+      pip: !tvMode,
+      autoMini: !tvMode,
+      screenshot: !tvMode,
+      setting: !tvMode,
+      playbackRate: !tvMode,
+      aspectRatio: !tvMode,
+      fullscreen: !tvMode,
+      fullscreenWeb: !tvMode,
+      miniProgressBar: !tvMode,
       mutex: true,
       backdrop: true,
       playsInline: true,
@@ -393,6 +414,10 @@ export function PlayerShell({
       },
     });
     artRef.current = art;
+    propsRef.current.onVideoReady?.(art.video);
+    const downloadTimer = propsRef.current.onDownloadSpeed ? setInterval(() => {
+      propsRef.current.onDownloadSpeed?.(downloadMeterRef.current?.bytesPerSecond() ?? 0);
+    }, 1000) : null;
 
     /**
      * 读解码后的真实分辨率。
@@ -476,6 +501,7 @@ export function PlayerShell({
 
     // —— 键盘快捷键（旧版 hotkey:false + 自定义逻辑的移植） ——
     const shortcuts = (e: KeyboardEvent) => {
+      if (propsRef.current.tvMode || e.defaultPrevented) return;
       const target = e.target as HTMLElement;
       // 输入框或按钮获得焦点时不劫持按键：否则空格会吞掉按钮的默认激活
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.closest('button')) return;
@@ -497,6 +523,9 @@ export function PlayerShell({
           if (current.volume > 0) { current.volume = Math.max(0, current.volume - 0.1); showHint(`音量 ${Math.round(current.volume * 100)}%`); e.preventDefault(); }
           break;
         case ' ':
+        case 'Enter':
+        case 'NumpadEnter':
+        case 'MediaPlayPause':
           current.toggle(); showHint('播放/暂停'); e.preventDefault();
           break;
         case 'f': case 'F':
@@ -530,7 +559,7 @@ export function PlayerShell({
     // 触屏不监听 mousemove/mouseleave，也跳过初始显示：iOS 点按视频的合成事件
     // 序列是 mousemove → click，若 mousemove 先把 show 置 true，紧跟的 ArtPlayer
     // click toggle 会把它翻回 false——控制栏「闪一下即隐」，正是 issue #937 的病灶
-    if (!touchPointer) {
+    if (!touchPointer && !tvMode) {
       el?.addEventListener('mousemove', showControlsOnPointerMove);
       el?.addEventListener('mouseleave', hideControlsOnMouseLeave);
       showControlsOnPointerMove();
@@ -590,6 +619,8 @@ export function PlayerShell({
       document.removeEventListener('keydown', shortcuts);
       document.removeEventListener('visibilitychange', saveOnHide);
       if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+      if (downloadTimer) clearInterval(downloadTimer);
+      downloadMeterRef.current = null;
       el?.removeEventListener('touchstart', onTouchStart);
       el?.removeEventListener('touchend', onTouchEnd);
       el?.removeEventListener('touchcancel', onTouchEnd);
@@ -606,6 +637,7 @@ export function PlayerShell({
       hlsRef.current = null;
       recoveryRef.current?.dispose();
       getVideoPrefetcher().stop();
+      propsRef.current.onVideoReady?.(null);
       art.destroy();
       artRef.current = null;
     };
@@ -648,7 +680,11 @@ export function PlayerShell({
   }, [adFilter]);
 
   return (
-    <div className="relative w-full h-full">
+    <div
+      className="relative w-full h-full"
+      data-tv-player={tvMode || undefined}
+      aria-label={tvMode ? '视频画面' : undefined}
+    >
       <div ref={containerRef} className="w-full h-full" style={{ WebkitTouchCallout: 'none' }} />
       {showPoster && !error && (
         <div
@@ -662,11 +698,11 @@ export function PlayerShell({
         />
       )}
       {error && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80">
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80" data-tv-playback-error={tvMode || undefined}>
           <p className="text-danger text-sm">{error}</p>
-          <button className="btn-ghost text-xs" onClick={() => location.reload()}>
-            重新加载
-          </button>
+          {tvMode ? <p className="text-sm">按下键打开控制栏，可选择换源</p> : (
+            <button className="btn-ghost text-xs" onClick={() => location.reload()}>重新加载</button>
+          )}
         </div>
       )}
       {hint && (
@@ -674,7 +710,7 @@ export function PlayerShell({
           {hint}
         </div>
       )}
-      {autoplayNext && !error && (
+      {autoplayNext && !error && !tvMode && (
         <div className="absolute bottom-16 right-3 text-[10px] text-muted bg-black/50 px-2 py-0.5 rounded pointer-events-none">
           自动连播已开启
         </div>

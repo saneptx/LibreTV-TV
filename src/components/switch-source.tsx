@@ -14,6 +14,7 @@ import { EmptyState, LoadingState } from './states';
 import { useFocusTrap } from './use-focus-trap';
 import { QualityBadge } from './quality-badge';
 import { useQualityProbe } from './use-quality-probe';
+import tvStyles from './tv-source-panel.module.css';
 
 /**
  * 换源面板：跨源按标题搜索 → 匹配同名/同前缀资源 → 并发测速（详情接口耗时）→ 按速度排序展示。
@@ -42,12 +43,14 @@ export function SwitchSourceModal({
   currentVodId,
   currentIndex,
   onClose,
+  tvMode = false,
 }: {
   currentTitle: string;
   currentSourceKey: string;
   currentVodId: string;
   currentIndex: number;
   onClose: () => void;
+  tvMode?: boolean;
 }) {
   const store = useAppStore();
   const router = useRouter();
@@ -183,11 +186,14 @@ export function SwitchSourceModal({
    */
   const selected =
     sorted.find((c) => candidateKey(c) === selectedKey) ??
-    sorted.find((c) => !isCurrentCandidate(c, currentSourceKey, currentVodId) && c.ok) ??
+    sorted.find((c) => tvMode
+      ? isCurrentCandidate(c, currentSourceKey, currentVodId)
+      : !isCurrentCandidate(c, currentSourceKey, currentVodId) && c.ok) ??
     sorted[0];
   const selectedCandidateKey = selected ? candidateKey(selected) : '';
 
   useEffect(() => {
+    if (tvMode) return;
     const el = tabBarRef.current;
     if (!el) return;
     const update = () =>
@@ -203,7 +209,15 @@ export function SwitchSourceModal({
       el.removeEventListener('scroll', update);
       ro.disconnect();
     };
-  }, [sorted.length]);
+  }, [sorted.length, tvMode]);
+
+  useEffect(() => {
+    if (!tvMode || phase !== 'done') return;
+    const frame = requestAnimationFrame(() => {
+      tabBarRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [tvMode, phase]);
 
   // 默认选中项常落在可视区外：滚进视野，否则高亮等于不存在
   useEffect(() => {
@@ -247,17 +261,104 @@ export function SwitchSourceModal({
     }
     const targetIndex = currentIndex < c.episodes ? currentIndex : 0;
     onClose(); // 先关闭面板，避免路由参数变化后弹窗残留旧数据
-    router.push(
-      buildWatchUrl({
+    const url = buildWatchUrl({
         sourceKey: c.source.key,
         vodId: c.result.vodId,
         index: targetIndex,
         title: c.result.name || currentTitle,
         sourceUrl: c.source.url,
         detail: c.source.detail,
-      })
-    );
+      }) + (tvMode ? '&tv=1' : '');
+    if (tvMode) router.replace(url);
+    else router.push(url);
   };
+
+  if (tvMode) {
+    const isCurrent = selected && isCurrentCandidate(selected, currentSourceKey, currentVodId);
+    const quality = selected ? qualityKey(selected.source.key, selected.result.vodId) : '';
+    const coverFailed = selected ? imgFailed[candidateKey(selected)] : false;
+    return (
+      <div className={tvStyles.overlay} onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+        <div ref={panelRef} tabIndex={-1} className={tvStyles.panel} role="dialog" aria-modal="true" aria-label={`换源：${currentTitle}`} data-tv-source-panel>
+          <header className={tvStyles.header}>
+            <div className={tvStyles.heading}>
+              <div className={tvStyles.eyebrow}>切换播放源</div>
+              <h2 title={currentTitle}>{currentTitle}</h2>
+              <p className={tvStyles.summary}>
+                {phase === 'searching' ? '正在搜索同名影片…' : phase === 'testing' ? '正在检查来源可用性…'
+                  : `共 ${sorted.length} 个来源 · ${sorted.filter((candidate) => candidate.ok).length} 个可用`}
+                {phase === 'done' && progress.total > 0 && (progress.done < progress.total
+                  ? ` · 画质探测 ${progress.done}/${progress.total}` : ` · 画质探测完成`)}
+              </p>
+            </div>
+            <button type="button" className={tvStyles.close} onClick={onClose}>返回播放</button>
+          </header>
+
+          {phase !== 'done' || !selected ? (
+            <div className={tvStyles.loading}>
+              {phase !== 'done' ? <LoadingState label={phase === 'searching' ? '正在搜索各来源…' : '正在检查播放资源…'} />
+                : <p>其他点播源未找到同名资源，请返回继续播放</p>}
+            </div>
+          ) : (
+            <div className={tvStyles.body}>
+              <section className={tvStyles.listSection} aria-label="播放源列表">
+                <p className={tvStyles.label}>选择来源 · 方向键浏览，确认键切换</p>
+                <div ref={tabBarRef} className={tvStyles.list} role="tablist" aria-label="选择播放源">
+                  {sorted.map((candidate) => {
+                    const current = isCurrentCandidate(candidate, currentSourceKey, currentVodId);
+                    const key = candidateKey(candidate);
+                    const qLabel = qualityLabel(qualities[qualityKey(candidate.source.key, candidate.result.vodId)]?.height);
+                    return (
+                      <button key={key} type="button" role="tab" aria-selected={selected === candidate} data-active={selected === candidate} className={tvStyles.choice}
+                        onFocus={() => setSelectedKey(key)}
+                        onClick={() => {
+                          if (current) onClose();
+                          else if (!candidate.episodes) void retest(candidate);
+                          else switchTo(candidate);
+                        }}>
+                        <span className={tvStyles.sourceName}>{candidate.source.name}</span>
+                        <span className={tvStyles.meta}>
+                          {candidate.ok ? <><span className={cn(tvStyles.dot, (candidate.ms ?? 0) > 2000 && tvStyles.slow)} /><span>{current ? '当前播放' : '可用'}</span><span>{qLabel || `${candidate.ms ?? 0} ms`}</span></>
+                            : <span className={tvStyles.failed}>{retestingKey === key ? '重新检测中…' : candidate.episodes ? '测速失败 · 可尝试' : '不可用 · 确认重测'}</span>}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className={tvStyles.detail} aria-label="来源详情">
+                <div className={tvStyles.detailHeader}>
+                  <div className={tvStyles.cover}>
+                    {selected.result.pic && !coverFailed ? (
+                      <SmartImage url={selected.result.pic} mode={store.imageProxyMode} customProxy={store.customImageProxy} alt={selected.result.name}
+                        onExhausted={() => setImgFailed((previous) => ({ ...previous, [candidateKey(selected)]: true }))} />
+                    ) : <div className={tvStyles.placeholder}><Icon name="link" className="w-6 h-6" /></div>}
+                  </div>
+                  <div className={tvStyles.detailTitle}>
+                    <h3>{selected.source.name}</h3>
+                    <p className={cn(tvStyles.status, isCurrent && tvStyles.playing)}>{isCurrent ? '当前正在播放' : selected.episodes ? '可切换至此来源' : '暂时无法获取资源'}</p>
+                    <div className={tvStyles.quality}>
+                      <span>画质</span>
+                      {qualities[quality] || probing[quality] ? <QualityBadge className={tvStyles.badge} entry={qualities[quality]} loading={probing[quality]} onRetry={() => retry([selected.result])} /> : <span>待检测</span>}
+                    </div>
+                  </div>
+                </div>
+                <div className={tvStyles.metrics}>
+                  <div className={tvStyles.metric}><span>响应速度</span><strong className={!selected.ok ? tvStyles.unavailable : undefined}>{selected.ok ? `${selected.ms} ms` : '暂不可用'}</strong></div>
+                  <div className={tvStyles.metric}><span>可用集数</span><strong>{selected.episodes ? `${selected.episodes} 集` : '暂无'}</strong></div>
+                </div>
+                <button type="button" className={tvStyles.action} disabled={!!isCurrent || !selected.episodes} onClick={() => switchTo(selected)}>{isCurrent ? '当前正在使用' : '切换到此源'}</button>
+                {!selected.ok && <button type="button" className={tvStyles.retry} disabled={retestingKey === candidateKey(selected)} onClick={() => void retest(selected)}>{retestingKey === candidateKey(selected) ? '重新检测中…' : '重新检测此来源'}</button>}
+                {!selected.ok && selected.error && <p className={tvStyles.error}>{selected.error}</p>}
+              </section>
+            </div>
+          )}
+          <footer className={tvStyles.footer}><span>方向键选择 · 确认换源 · 返回继续观看</span><span>列表可上下滚动</span></footer>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

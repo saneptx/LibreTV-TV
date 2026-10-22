@@ -4,11 +4,12 @@ plugins {
 }
 
 val libreTvUrl = providers.gradleProperty("LIBRETV_URL")
-    .orElse("http://10.0.2.2:8080/tv")
+    .orElse("")
 
 android {
     namespace = "org.libretv.tv"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "org.libretv.tv"

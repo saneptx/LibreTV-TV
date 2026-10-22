@@ -125,7 +125,7 @@ export interface BangumiCalendarResponse {
 }
 
 export interface AuthStatusResponse {
-  /** 服务器是否配置了 PASSWORD */
+  /** 访问验证开启时，服务器是否已配置 PASSWORD；关闭验证时为 false */
   passwordRequired: boolean;
   /** 当前会话是否已验证 */
   verified: boolean;

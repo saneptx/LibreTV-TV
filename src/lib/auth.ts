@@ -20,6 +20,11 @@ export function isPasswordConfigured(): boolean {
   return getPassword().length > 0;
 }
 
+/** 由部署者显式关闭访问验证；普通部署默认仍要求登录。 */
+export function isAuthDisabled(): boolean {
+  return process.env.AUTH_DISABLED === 'true';
+}
+
 function getSecret(): string {
   if (process.env.PROXY_SECRET) return process.env.PROXY_SECRET;
   return crypto.createHash('sha256').update(getPassword() + ':libretv::session-salt').digest('hex');

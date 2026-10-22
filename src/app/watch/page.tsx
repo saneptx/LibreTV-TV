@@ -15,6 +15,7 @@ const PlayerShell = dynamic(() => import('@/components/player-shell').then((m) =
     </div>
   ),
 });
+const TvWatchPlayer = dynamic(() => import('@/components/tv-watch-player').then((m) => m.TvWatchPlayer), { ssr: false });
 import { EmptyState, LoadingState, Spinner } from '@/components/states';
 import { SwitchSourceModal } from '@/components/switch-source';
 import { enqueueDownload } from '@/components/download-manager';
@@ -56,6 +57,7 @@ function WatchContent() {
   const directUrl = searchParams.get('url') || '';
   const titleParam = searchParams.get('title') || '';
   const indexParam = parseInt(searchParams.get('index') || '0', 10) || 0;
+  const tvMode = searchParams.get('tv') === '1';
 
   const [reversed, setReversed] = useState(false);
   const [switchOpen, setSwitchOpen] = useState(false);
@@ -146,7 +148,7 @@ function WatchContent() {
   const autoNextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (autoNextTimer.current) clearTimeout(autoNextTimer.current);
-  }, []);
+  }, [currentUrl]);
 
   const handleEnded = useCallback(() => {
     if (vodId) clearProgress(sourceKey, vodId, currentIndex).catch(() => {});
@@ -157,6 +159,7 @@ function WatchContent() {
 
   // Alt+←/→ 集数切换快捷键
   useEffect(() => {
+    if (tvMode) return;
     const handler = (e: KeyboardEvent) => {
       if (!e.altKey) return;
       if (e.key === 'ArrowLeft' && currentIndex > 0) {
@@ -169,7 +172,7 @@ function WatchContent() {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [currentIndex, episodes.length, goEpisode]);
+  }, [tvMode, currentIndex, episodes.length, goEpisode]);
 
   const orderedEpisodes = reversed ? [...episodes].map((_, i) => episodes.length - 1 - i) : episodes.map((_, i) => i);
 
@@ -195,12 +198,49 @@ function WatchContent() {
     );
   }
 
+  if (tvMode) {
+    return (
+      <TvWatchPlayer
+        sourceName={source.name}
+        sourceKey={sourceKey}
+        vodId={vodId}
+        episodes={episodes}
+        currentIndex={currentIndex}
+        loading={detailQuery.isLoading}
+        loadError={detailQuery.isError}
+        onEpisode={goEpisode}
+        onExit={() => {
+          if (window.history.length > 1) router.back();
+          else router.replace('/tv');
+        }}
+        player={{
+          url: currentUrl,
+          title: videoTitle,
+          adFilter: store.adFilter,
+          autoplayNext: store.autoplayNext,
+          episodeKey: `${sourceKey}:${vodId}:${currentIndex}`,
+          nextUrl: episodes[currentIndex + 1],
+          nextEpisodeKey: episodes[currentIndex + 1] ? `${sourceKey}:${vodId}:${currentIndex + 1}` : undefined,
+          getRestorePosition,
+          onTimeUpdate: handleProgress,
+          onPause: handleProgress,
+          onEnded: handleEnded,
+          onQuality: (height) => {
+            if (sourceKey && vodId) useAppStore.getState().setQuality({
+              [qualityKey(sourceKey, vodId)]: { height, from: 'play', timestamp: Date.now() },
+            });
+          },
+        }}
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className={cn('min-h-screen flex flex-col', tvMode && 'tv-watch')}>
       <header className="sticky top-0 z-40 bg-surface/90 backdrop-blur border-b border-line">
         <div className="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
-          <BackButton />
-          <HomeButton />
+          <BackButton tvMode={tvMode} />
+          <HomeButton tvMode={tvMode} />
           <div className="min-w-0">
             <h1 className="text-sm font-medium text-content truncate">{videoTitle}</h1>
             <p className="text-xs text-faint">
@@ -211,6 +251,7 @@ function WatchContent() {
           <div className="ml-auto flex items-center gap-2">
             <button
               className="btn-ghost btn-sm"
+              data-tv-focus={tvMode || undefined}
               onClick={() => {
                 if (!currentUrl) return;
                 enqueueDownload({
@@ -225,7 +266,7 @@ function WatchContent() {
             >
               下载本集
             </button>
-            <button className="btn-ghost btn-sm" onClick={() => setSwitchOpen(true)}>
+            <button data-tv-focus={tvMode || undefined} className="btn-ghost btn-sm" onClick={() => setSwitchOpen(true)}>
               切换资源
             </button>
           </div>
@@ -235,7 +276,9 @@ function WatchContent() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-4">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
           <div>
-            <div className="aspect-video bg-black rounded-lg overflow-hidden">
+            <div
+              className="aspect-video bg-black rounded-lg overflow-hidden"
+            >
               {currentUrl ? (
                 <PlayerShell
                   url={currentUrl}
@@ -251,6 +294,7 @@ function WatchContent() {
                   onEnded={handleEnded}
                   hasPrevEpisode={currentIndex > 0}
                   hasNextEpisode={episodes.length > 0 && currentIndex < episodes.length - 1}
+                  tvMode={tvMode}
                   onPrevEpisode={() => goEpisode(currentIndex - 1)}
                   onNextEpisode={() => goEpisode(currentIndex + 1)}
                   onQuality={(height) => {
@@ -278,6 +322,7 @@ function WatchContent() {
             <div className="flex flex-wrap items-center gap-2 mt-3">
               <button
                 className="btn-ghost btn-sm"
+                data-tv-focus={tvMode || undefined}
                 disabled={currentIndex <= 0}
                 onClick={() => goEpisode(currentIndex - 1)}
               >
@@ -285,6 +330,7 @@ function WatchContent() {
               </button>
               <button
                 className="btn-ghost btn-sm"
+                data-tv-focus={tvMode || undefined}
                 disabled={episodes.length === 0 || currentIndex >= episodes.length - 1}
                 onClick={() => goEpisode(currentIndex + 1)}
               >
@@ -294,6 +340,7 @@ function WatchContent() {
                 <input
                   type="checkbox"
                   className="h-3.5 w-3.5 accent-[#2563eb]"
+                  data-tv-focus={tvMode || undefined}
                   checked={store.autoplayNext}
                   onChange={(e) => store.updateSettings({ autoplayNext: e.target.checked })}
                 />
@@ -312,6 +359,7 @@ function WatchContent() {
               {episodes.length > 1 && (
                 <button
                   className="btn-ghost btn-sm shrink-0"
+                  data-tv-focus={tvMode || undefined}
                   onClick={() => setReversed((v) => !v)}
                   aria-label={reversed ? '切换为正序排列' : '切换为倒序排列'}
                   title="调整剧集列表的排列顺序"
@@ -337,6 +385,7 @@ function WatchContent() {
                     key={realIndex}
                     index={realIndex}
                     active={realIndex === currentIndex}
+                    tvMode={tvMode}
                     onClick={() => goEpisode(realIndex)}
                   />
                 ))}
@@ -363,7 +412,7 @@ function WatchContent() {
 }
 
 /** 集数按钮：激活时自动滚动进可视区（长剧列表） */
-function EpisodeButton({ index, active, onClick }: { index: number; active: boolean; onClick: () => void }) {
+function EpisodeButton({ index, active, onClick, tvMode }: { index: number; active: boolean; onClick: () => void; tvMode: boolean }) {
   const ref = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -374,6 +423,7 @@ function EpisodeButton({ index, active, onClick }: { index: number; active: bool
     <button
       ref={ref}
       className={cn('btn btn-sm !px-1', active ? 'episode-active' : 'btn-ghost')}
+      data-tv-focus={tvMode || undefined}
       onClick={onClick}
     >
       {index + 1}
@@ -381,11 +431,12 @@ function EpisodeButton({ index, active, onClick }: { index: number; active: bool
   );
 }
 
-function BackButton() {
+function BackButton({ tvMode }: { tvMode: boolean }) {
   const router = useRouter();
   return (
     <button
       className="p-2 -ml-2 rounded-md text-muted hover:text-content hover:bg-hover transition-colors"
+      data-tv-focus={tvMode || undefined}
       onClick={() => {
         if (window.history.length > 1) router.back();
         else router.push('/');
@@ -400,11 +451,12 @@ function BackButton() {
 }
 
 /** 首页按钮：直达首页，避免从外链进入时逐级 back */
-function HomeButton() {
+function HomeButton({ tvMode }: { tvMode: boolean }) {
   return (
     <Link
       href="/"
       className="p-2 rounded-md text-muted hover:text-content hover:bg-hover transition-colors"
+      data-tv-focus={tvMode || undefined}
       aria-label="回首页"
       title="回首页"
     >

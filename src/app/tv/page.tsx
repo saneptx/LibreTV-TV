@@ -7,6 +7,7 @@ import { resolveSource, useAppStore } from '@/lib/store';
 import type { SearchResultItem, SourceConfig, VideoDetail } from '@/lib/types';
 import { aggregateResults, type AggregatedGroup } from '@/components/video-card';
 import { SmartImage } from '@/components/smart-image';
+import { useSearchHistory } from '@/components/search-history';
 import { buildWatchUrl, validateSourceUrl } from '@/lib/utils';
 import styles from './tv.module.css';
 
@@ -18,7 +19,7 @@ function focusFirst(scope: ParentNode = document) {
 }
 
 /** 浏览器本身没有稳定的电视遥控器空间导航，用元素坐标选择当前方向最近的控件。 */
-function useDpadNavigation(onBack: () => boolean) {
+function useDpadNavigation(onBack: () => boolean, getScope: () => ParentNode | null) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' || event.key === 'BrowserBack') {
@@ -27,9 +28,10 @@ function useDpadNavigation(onBack: () => boolean) {
       }
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
 
+      const scope = getScope() ?? document;
       const active = document.activeElement as HTMLElement | null;
       if (active instanceof HTMLInputElement && ['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-      const nodes = [...document.querySelectorAll<HTMLElement>(FOCUS_SELECTOR)].filter(
+      const nodes = [...scope.querySelectorAll<HTMLElement>(FOCUS_SELECTOR)].filter(
         (node) => node.offsetParent !== null
       );
       if (!active || !nodes.includes(active)) {
@@ -70,7 +72,7 @@ function useDpadNavigation(onBack: () => boolean) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onBack]);
+  }, [onBack, getScope]);
 }
 
 export default function TvPage() {
@@ -87,7 +89,10 @@ export default function TvPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
   const [visibleCount, setVisibleCount] = useState(RESULT_PAGE_SIZE);
+  const searchHistory = useSearchHistory('');
+  const searchInput = useRef<HTMLInputElement>(null);
   const searchAbort = useRef<AbortController | null>(null);
+  const lastFocus = useRef<HTMLElement | null>(null);
 
   const sources = useMemo(() => {
     const seen = new Set<string>();
@@ -103,15 +108,38 @@ export default function TvPage() {
   const groups = useMemo(() => aggregateResults(items), [items]);
   const visibleGroups = useMemo(() => groups.slice(0, visibleCount), [groups, visibleCount]);
 
+  const openGroup = useCallback((group: AggregatedGroup) => {
+    lastFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSelectedGroup(group);
+    setSelectedItem(group.items[0] ?? null);
+  }, []);
+
   const closePanel = useCallback(() => {
     if (!selectedGroup) return false;
     setSelectedGroup(null);
     setSelectedItem(null);
     setDetail(null);
     setDetailError('');
+    requestAnimationFrame(() => lastFocus.current?.focus({ preventScroll: true }));
     return true;
   }, [selectedGroup]);
-  useDpadNavigation(closePanel);
+  const dialogScope = useCallback(() => document.querySelector<HTMLElement>('[data-tv-dialog]'), []);
+  useDpadNavigation(closePanel, dialogScope);
+
+  // 投影仪 WebView 会把确认键用于原生焦点而不触发网页 button 的 click。原生壳
+  // 发送该事件后，直接依据当前焦点执行操作，避免依赖不稳定的模拟点击。
+  useEffect(() => {
+    const activateFocused = () => {
+      const element = document.activeElement as HTMLElement | null;
+      const groupKey = element?.dataset.tvGroupKey;
+      if (groupKey) {
+        const group = groups.find((candidate) => candidate.key === groupKey);
+        if (group) openGroup(group);
+      }
+    };
+    window.addEventListener('libretv-tv-activate', activateFocused);
+    return () => window.removeEventListener('libretv-tv-activate', activateFocused);
+  }, [groups, openGroup]);
 
   useEffect(() => {
     focusFirst();
@@ -149,7 +177,11 @@ export default function TvPage() {
 
   const search = async (text: string) => {
     const keyword = text.trim().slice(0, 100);
-    if (!keyword) return;
+    if (!keyword) {
+      setMessage('请输入片名');
+      focusFirst();
+      return;
+    }
     if (sources.length === 0) {
       setMessage('没有启用的点播源，请先在桌面版设置中配置');
       return;
@@ -157,6 +189,8 @@ export default function TvPage() {
     searchAbort.current?.abort();
     const controller = new AbortController();
     searchAbort.current = controller;
+    setQuery(keyword);
+    searchHistory.record(keyword);
     setLoading(true);
     setSearched(keyword);
     setItems([]);
@@ -181,18 +215,13 @@ export default function TvPage() {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       setMessage(error instanceof Error ? error.message : '搜索失败');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     void search(query);
-  };
-
-  const openGroup = (group: AggregatedGroup) => {
-    setSelectedGroup(group);
-    setSelectedItem(group.items[0] ?? null);
   };
 
   const play = (index: number) => {
@@ -220,17 +249,52 @@ export default function TvPage() {
 
       <form className={styles.search} onSubmit={submit}>
         <input
+          ref={searchInput}
           data-tv-focus
+          data-tv-search-input
           autoFocus
           aria-label="搜索影片"
           placeholder="搜索电影、剧集或动漫"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-        <button data-tv-focus type="submit" disabled={loading || !query.trim()}>
+        <button data-tv-focus type="submit" disabled={loading}>
           {loading ? '搜索中…' : '搜索'}
         </button>
       </form>
+
+      {searchHistory.matches.length > 0 && (
+        <section className={styles.history} aria-label="搜索历史">
+          <div className={styles.historyHeader}>
+            <h2>最近搜索</h2>
+            <button
+              data-tv-focus
+              type="button"
+              className={styles.clearHistory}
+              onClick={() => {
+                void searchHistory.clearAll().then(() => searchInput.current?.focus({ preventScroll: true }));
+              }}
+            >
+              清空历史
+            </button>
+          </div>
+          <div className={styles.historyItems}>
+            {searchHistory.matches.map((entry) => (
+              <button
+                data-tv-focus
+                data-tv-history={entry.text}
+                type="button"
+                className={styles.historyItem}
+                key={entry.text}
+                title={entry.text}
+                onClick={() => { void search(entry.text); }}
+              >
+                {entry.text}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className={styles.status} aria-live="polite">
         <strong>{searched || '电视模式'}</strong>
@@ -243,6 +307,14 @@ export default function TvPage() {
             {visibleGroups.map((group) => (
               <button
                 data-tv-focus
+                data-tv-group-key={group.key}
+                data-tv-watch-url={`${buildWatchUrl({
+                  sourceKey: group.items[0].sourceKey,
+                  vodId: group.items[0].vodId,
+                  index: 0,
+                  title: group.items[0].name,
+                  sourceUrl: group.items[0].sourceUrl,
+                })}&tv=1`}
                 type="button"
                 className={styles.card}
                 key={group.key}
@@ -287,7 +359,7 @@ export default function TvPage() {
 
       {selectedGroup && selectedItem && (
         <div className={styles.overlay} role="presentation" onClick={(event) => event.target === event.currentTarget && closePanel()}>
-          <section className={styles.dialog} role="dialog" aria-modal="true" aria-label={`${selectedGroup.name} 详情`}>
+          <section data-tv-dialog className={styles.dialog} role="dialog" aria-modal="true" aria-label={`${selectedGroup.name} 详情`}>
             <header className={styles.dialogHeader}>
               <div>
                 <span className={styles.eyebrow}>SELECT EPISODE</span>
