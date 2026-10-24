@@ -13,6 +13,13 @@ APK="$ANDROID_TV_ROOT/app/build/outputs/apk/debug/app-debug.apk"
 EMULATOR_CONFIG_HOME="$ANDROID_TV_ROOT/.emulator-config"
 SERIAL="emulator-5554"
 EMULATOR_PID=""
+START_ARGS=()
+case "${1:-}" in
+  "") ;;
+  --native-preview) ;; # 兼容旧命令；原生复刻现已是默认入口。
+  --legacy-web) START_ARGS=(--ez legacy_web_ui true) ;;
+  *) echo "用法：$0 [--legacy-web]（旧参数 --native-preview 仍兼容）" >&2; exit 2 ;;
+esac
 
 if [[ ! -x "$EMULATOR" || ! -x "$ADB" || ! -d "$AVD_HOME/$AVD_NAME.avd" ]]; then
   echo "本地 TV 模拟器尚未配置完成。请先完成 Android SDK、系统镜像和 AVD 安装。" >&2
@@ -59,12 +66,17 @@ if [[ "$RUNNING_AVD" != "$AVD_NAME" ]]; then
   exit 1
 fi
 
-"$ADB" -s "$SERIAL" reverse tcp:8080 tcp:8080
+# 独立 APK 不需要开发机端口转发；清理旧版留下的转发。
+"$ADB" -s "$SERIAL" reverse --remove tcp:8080 2>/dev/null || true
 (cd "$ANDROID_TV_ROOT" && ./gradlew assembleDebug)
 "$ADB" -s "$SERIAL" install -r "$APK"
-"$ADB" -s "$SERIAL" shell am start -n org.libretv.tv/.MainActivity
+"$ADB" -s "$SERIAL" shell am start -S -n org.libretv.tv/.MainActivity "${START_ARGS[@]}"
 
-echo "LibreTV-TV 已在 $SERIAL 启动；应用服务请保持运行在宿主机 8080 端口。"
+if [[ ${#START_ARGS[@]} -gt 0 ]]; then
+  echo "LibreTV-TV 旧网页界面对照已在 $SERIAL 启动；仅供调试。"
+else
+  echo "LibreTV-TV 原生复刻界面已在 $SERIAL 启动，与投影仪桌面入口一致；独立模式无需启动本机服务。"
+fi
 if [[ -n "$EMULATOR_PID" ]]; then
   echo "保持此终端打开，关闭模拟器窗口后脚本结束。"
   wait "$EMULATOR_PID"

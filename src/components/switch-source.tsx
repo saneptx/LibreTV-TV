@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/client-api';
-import type { SourceConfig, SearchResultItem } from '@/lib/types';
+import type { SourceConfig } from '@/lib/types';
 import { buildWatchUrl, cn } from '@/lib/utils';
 import { useAppStore, resolveSource } from '@/lib/store';
 import { qualityKey, qualityLabel } from '@/lib/quality';
@@ -15,21 +15,16 @@ import { useFocusTrap } from './use-focus-trap';
 import { QualityBadge } from './quality-badge';
 import { useQualityProbe } from './use-quality-probe';
 import tvStyles from './tv-source-panel.module.css';
+import { discoverSources, updateSourceCandidate, type SourceCandidate } from '@/lib/source-discovery';
+import { sourceIdentity } from '@/lib/source-cache';
+import { compareSourceResolution } from '@/lib/source-order';
 
 /**
- * 换源面板：跨源按标题搜索 → 匹配同名/同前缀资源 → 并发测速（详情接口耗时）→ 按速度排序展示。
+ * 换源面板：跨源按标题搜索 → 匹配资源 → 并发测速/画质探测 → 按原始分辨率降序。
  * 切换时保留当前集数索引（旧版 switchToResource 逻辑的去 DOM 化重写）。
  */
 
-interface Candidate {
-  source: SourceConfig;
-  result: SearchResultItem;
-  ms?: number;
-  ok?: boolean;
-  episodes?: number;
-  /** 测速失败原因：失败源点开后至少能知道是超时、还是源站直接拒绝 */
-  error?: string;
-}
+type Candidate = SourceCandidate;
 
 /** 候选条目的稳定标识：选中态必须绑它，绑数组下标会在测速结果重排后指错源 */
 const candidateKey = (c: Candidate) => `${c.source.key}_${c.result.vodId}`;
@@ -56,6 +51,9 @@ export function SwitchSourceModal({
   const router = useRouter();
   const { toast } = useToast();
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [fromCache, setFromCache] = useState(false);
   const [phase, setPhase] = useState<'searching' | 'testing' | 'done'>('searching');
   /** 封面加载失败记录（按卡片 key）；失败后降级为占位图标，避免破图 */
   const [imgFailed, setImgFailed] = useState<Record<string, boolean>>({});
@@ -64,9 +62,11 @@ export function SwitchSourceModal({
   /** 正在单独重测的候选 key：失败源给一次重试机会，失败原因不能只是死路 */
   const [retestingKey, setRetestingKey] = useState('');
   /** 重测的在途请求：换片重搜/关闭面板时中止，避免卸载后 setState */
+  const qualityRefreshRef = useRef(0);
   const retestAbortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const tabBarRef = useRef<HTMLDivElement>(null);
+  const focusedSourceRef = useRef<string | null>(null);
   /** Tab 栏左右是否还有内容：没有渐隐提示，用户不知道右边还藏着源 */
   const [tabEdges, setTabEdges] = useState({ left: false, right: false });
 
@@ -84,6 +84,8 @@ export function SwitchSourceModal({
         return true;
       });
   }, [store]);
+
+  const sourceScope = JSON.stringify(sources.map(sourceIdentity));
 
   useEffect(() => {
     // 弹窗打开期间锁定背景滚动；Esc 关闭（与其它弹窗一致）
@@ -108,40 +110,23 @@ export function SwitchSourceModal({
     let cancelled = false;
 
     (async () => {
-      // 1) 并行搜索所有选中源
-      setPhase('searching');
+      if (refreshEpoch === 0) { setCandidates([]); setPhase('searching'); }
+      setRefreshing(true);
       try {
-        const { list } = await api.search(currentTitle, sources, store.yellowFilter, { signal: controller.signal });
-        if (cancelled) return;
-
-        // 匹配口径：优先完全同名，其次名称以标题开头（兼容「小偷 HD」「小偷[电影解说]」这类修饰名）。
-        // 都没有则不展示该源——不再兜底取搜索第一条，避免把搜到的其他影片（如搜「小偷」
-        // 命中的《宝贝 小偷与大盗》）误当成换源目标。
-        const title = currentTitle.trim();
-        const matched: Candidate[] = [];
-        for (const s of sources) {
-          const hits = list.filter((r) => r.sourceKey === s.key);
-          const exact =
-            hits.find((r) => (r.name || '').trim() === title) ??
-            hits.find((r) => (r.name || '').trim().startsWith(title));
-          if (exact) matched.push({ source: s, result: exact });
-        }
-
-        // 2) 并发测速（详情接口耗时）并获取集数
-        setPhase('testing');
-        await Promise.all(
-          matched.map(async (c) => {
-            const r = await api.detailSpeed(c.result.vodId, c.source, controller.signal);
+        await discoverSources({ title: currentTitle, sources, filterAdult: store.yellowFilter, signal: controller.signal,
+          forceRefresh: refreshEpoch > 0,
+          search: forceRefresh => api.search(currentTitle, sources, store.yellowFilter, { signal: controller.signal, forceRefresh }),
+          inspect: async (item, source, forceRefresh) => {
+            const r = await api.detailSpeed(item.vodId, source, controller.signal, { forceRefresh });
+            return { ok: r.ok, ms: r.ms, episodes: r.detail?.episodes.length ?? 0, error: r.ok ? undefined : r.error };
+          },
+          onSnapshot: snapshot => {
             if (cancelled) return;
-            c.ok = r.ok;
-            c.ms = r.ms;
-            c.episodes = r.detail?.episodes.length ?? 0;
-            c.error = r.ok ? undefined : r.error;
-          })
-        );
-        if (cancelled) return;
-        setCandidates(matched);
-        setPhase('done');
+            setCandidates(snapshot.rows); setPhase('done'); setFromCache(snapshot.cached); setRefreshing(snapshot.refreshing);
+          },
+          onTesting: () => { if (!cancelled) setPhase(previous => previous === 'done' ? previous : 'testing'); },
+          onWarning: message => { if (!cancelled) toast(message, 'warning'); },
+        });
       } catch (err) {
         // 主动中止不算失败，不提示
         const aborted = err instanceof DOMException && err.name === 'AbortError';
@@ -149,7 +134,7 @@ export function SwitchSourceModal({
           toast(err instanceof Error ? err.message : '换源搜索失败', 'error');
           setPhase('done');
         }
-      }
+      } finally { if (!cancelled) setRefreshing(false); }
     })();
 
     return () => {
@@ -159,26 +144,31 @@ export function SwitchSourceModal({
       retestAbortRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTitle, store.yellowFilter]);
+  }, [currentTitle, store.yellowFilter, sourceScope, refreshEpoch]);
 
   const { qualities, probing, progress, probe, retry } = useQualityProbe(sources);
 
   // 测速完成后补探画质：用户正是在这里比较来源，「快」和「清楚」要能一起看。
   // 只探测速成功的候选——详情接口都打不通的源，再花 8s 探 m3u8 没有意义。
   useEffect(() => {
-    if (phase !== 'done') return;
+    if (phase !== 'done' || refreshing) return;
     const targets = candidates.filter((c) => c.ok).map((c) => c.result);
-    if (targets.length > 0) probe(targets);
-  }, [phase, candidates, probe]);
+    if (targets.length === 0) return;
+    if (refreshEpoch > qualityRefreshRef.current) { qualityRefreshRef.current = refreshEpoch; retry(targets); }
+    else probe(targets);
+  }, [phase, candidates, probe, retry, refreshing, refreshEpoch]);
 
-  const sorted = useMemo(() => [...candidates].sort((a, b) => {
-    const aCurrent = isCurrentCandidate(a, currentSourceKey, currentVodId);
-    const bCurrent = isCurrentCandidate(b, currentSourceKey, currentVodId);
-    if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
-    const msA = a.ok ? a.ms ?? 99_999 : 99_999;
-    const msB = b.ok ? b.ms ?? 99_999 : 99_999;
-    return msA - msB;
-  }), [candidates, currentSourceKey, currentVodId]);
+  const sorted = useMemo(() => [...candidates].sort((a, b) => compareSourceResolution(
+    { ...a, height: qualities[qualityKey(a.source.key, a.result.vodId)]?.height },
+    { ...b, height: qualities[qualityKey(b.source.key, b.result.vodId)]?.height }
+  )), [candidates, qualities]);
+  useLayoutEffect(() => {
+    if (!tvMode || !focusedSourceRef.current || panelRef.current?.contains(document.activeElement)) return;
+    const focused = [...(tabBarRef.current?.querySelectorAll<HTMLButtonElement>('[data-source-key]') ?? [])]
+      .find(button => button.dataset.sourceKey === focusedSourceRef.current);
+    focused?.focus({ preventScroll: true });
+    focused?.scrollIntoView({ block: 'nearest' });
+  }, [sorted, tvMode]);
 
   /**
    * 面板展示的源：优先用户点过的那个；还没点过时先落到「第一个可切换的源」——
@@ -235,7 +225,8 @@ export function SwitchSourceModal({
     const controller = new AbortController();
     retestAbortRef.current = controller;
     try {
-      const r = await api.detailSpeed(c.result.vodId, c.source, controller.signal);
+      const r = await api.detailSpeed(c.result.vodId, c.source, controller.signal, { forceRefresh: true });
+      if (!controller.signal.aborted) updateSourceCandidate(currentTitle, sources, store.yellowFilter, { ...c, ok: r.ok, ms: r.ms, episodes: r.detail?.episodes.length ?? 0, error: r.ok ? undefined : r.error });
       if (controller.signal.aborted) return;
       setCandidates((prev) =>
         prev.map((x) =>
@@ -279,7 +270,8 @@ export function SwitchSourceModal({
     const coverFailed = selected ? imgFailed[candidateKey(selected)] : false;
     return (
       <div className={tvStyles.overlay} onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-        <div ref={panelRef} tabIndex={-1} className={tvStyles.panel} role="dialog" aria-modal="true" aria-label={`换源：${currentTitle}`} data-tv-source-panel>
+        <div ref={panelRef} tabIndex={-1} className={tvStyles.panel} role="dialog" aria-modal="true" aria-label={`换源：${currentTitle}`} data-tv-source-panel
+          onFocusCapture={event => { focusedSourceRef.current = (event.target as HTMLElement).dataset.sourceKey ?? null; }}>
           <header className={tvStyles.header}>
             <div className={tvStyles.heading}>
               <div className={tvStyles.eyebrow}>切换播放源</div>
@@ -287,10 +279,12 @@ export function SwitchSourceModal({
               <p className={tvStyles.summary}>
                 {phase === 'searching' ? '正在搜索同名影片…' : phase === 'testing' ? '正在检查来源可用性…'
                   : `共 ${sorted.length} 个来源 · ${sorted.filter((candidate) => candidate.ok).length} 个可用`}
+                {phase === 'done' && (refreshing ? ' · 后台刷新中…' : fromCache ? ' · 已使用缓存' : '')}
                 {phase === 'done' && progress.total > 0 && (progress.done < progress.total
                   ? ` · 画质探测 ${progress.done}/${progress.total}` : ` · 画质探测完成`)}
               </p>
             </div>
+            <button type="button" className={tvStyles.close} disabled={refreshing} onClick={() => setRefreshEpoch(value => value + 1)}>{refreshing ? '刷新中…' : '刷新来源'}</button>
             <button type="button" className={tvStyles.close} onClick={onClose}>返回播放</button>
           </header>
 
@@ -302,14 +296,14 @@ export function SwitchSourceModal({
           ) : (
             <div className={tvStyles.body}>
               <section className={tvStyles.listSection} aria-label="播放源列表">
-                <p className={tvStyles.label}>选择来源 · 方向键浏览，确认键切换</p>
+                <p className={tvStyles.label}>按原始分辨率从高到低 · 方向键浏览，确认键切换</p>
                 <div ref={tabBarRef} className={tvStyles.list} role="tablist" aria-label="选择播放源">
                   {sorted.map((candidate) => {
                     const current = isCurrentCandidate(candidate, currentSourceKey, currentVodId);
                     const key = candidateKey(candidate);
                     const qLabel = qualityLabel(qualities[qualityKey(candidate.source.key, candidate.result.vodId)]?.height);
                     return (
-                      <button key={key} type="button" role="tab" aria-selected={selected === candidate} data-active={selected === candidate} className={tvStyles.choice}
+                      <button key={key} type="button" role="tab" aria-selected={selected === candidate} data-active={selected === candidate} data-source-key={key} className={tvStyles.choice}
                         onFocus={() => setSelectedKey(key)}
                         onClick={() => {
                           if (current) onClose();
@@ -400,6 +394,7 @@ export function SwitchSourceModal({
               </p>
             )}
           </div>
+          <button className="px-3 py-2 text-xs text-muted" disabled={refreshing} onClick={() => setRefreshEpoch(value => value + 1)}>{refreshing ? '刷新中…' : '刷新来源'}</button>
           <button className="p-1.5 rounded-md text-muted hover:text-content hover:bg-hover" onClick={onClose} aria-label="关闭">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

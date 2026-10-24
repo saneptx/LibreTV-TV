@@ -24,3 +24,6 @@ android-tv/.kotlin/
 android-tv/app/build/
 android-tv/local.properties
 android-tv/.emulator.log
+
+android-tv/.web-build/
+.desktop-server/

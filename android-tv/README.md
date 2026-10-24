@@ -1,20 +1,14 @@
-# LibreTV Android TV 壳
+# LibreTV Android TV
 
-这是 `/tv` 页面对应的轻量 Android TV WebView 客户端。LibreTV 服务端仍运行在电脑、NAS 或云服务器上。首次打开 APK 会用遥控器输入服务地址；之后按遥控器的菜单或设置键可以随时修改。
+当前 APK **0.4.5** 已支持投影仪独立运行：界面随 APK 打包，搜索和 Media3 播放直接使用设备网络，无需电脑服务器和密码。覆盖安装保留原有记录。首页「片源管理」或菜单键可管理来源。实现、升级与限制见 [独立运行说明](STANDALONE.md)。
 
-## 配置地址
+界面布局和遥控器操作沿用此前确认的原设计。0.4.4 将桌面图标、模拟器和重开应用统一为原生复刻入口，避免因缺少 `native_preview` 参数切回另一套网页布局。直接运行 `./android-tv/run_local_tv_emulator.sh` 即可；旧 `--native-preview` 参数仍兼容，调试对照旧网页使用 `--legacy-web`。见 [迁移记录](NATIVE_UI_MIGRATION.md)。
 
-默认不需要在构建时设置地址。若要为测试包预填地址（首次配置页仍可修改），可在项目的 `gradle.properties` 或用户级 Gradle 属性中加入：
-
-```properties
-LIBRETV_URL=http://192.168.1.10:8080/tv
-```
-
-将 IP 换成运行 LibreTV 的设备地址。电视和服务端需要能互相访问；Android 模拟器可继续使用默认的 `10.0.2.2`。
+0.4.2 默认超分只升高一个档位（720P → 1080P、1080P → 4K），换源按原始分辨率降序并保持焦点。0.4.1 增加原始/输出分辨率、实际超分与去广告结果标注，电脑端提供可选 4K 档位。0.4.0 将可选电脑串流升级为广告分片过滤、GPU 超分和 H.264/AAC 编码（先在模拟器验证），入口仍位于原来的「片源管理」。独立直连仍为默认模式；界面及遥控逻辑保持原样。启动、配对与测试见 [电脑串流说明](../desktop-server/README.md)。
 
 ## 构建
 
-安装 JDK 17 和 Android SDK 35 后，在 Android Studio 中选择 `app` 并运行，或从 Gradle 工具窗口执行 `app > Tasks > build > assembleDebug`。也可直接使用仓库内的 Gradle Wrapper：
+先在项目根目录执行 `npm ci`，再安装 JDK 17 和 Android SDK 35。之后，在 Android Studio 中选择 `app` 并运行，或从 Gradle 工具窗口执行 `app > Tasks > build > assembleDebug`。也可直接使用仓库内的 Gradle Wrapper：
 
 ```bash
 ./gradlew assembleDebug
@@ -24,11 +18,23 @@ APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 
 ## 当前边界
 
-- 界面、搜索和详情使用 `/tv`；播放仍复用 LibreTV `/watch` 页面，并启用遥控器快捷键。
-- 登录 Cookie 和观看历史保存在电视 WebView 本地。
+- 界面由 Android 控件绘制，APK 中不可见的 `/native-tv` 数据页复用搜索、详情、换源、画质及持久化逻辑，播放使用 Media3。普通浏览器仍使用原网页。
+- 片源配置、搜索历史、观看记录保存在电视 WebView 本地。
 - 同时注册 Android TV 和普通 Android 启动入口，可安装到电视盒子及常见安卓投影仪。
 - 局域网 HTTP 已允许；公网部署请使用 HTTPS。
-- 下一阶段可以把播放部分替换为 Media3/ExoPlayer，改善低配投影仪上的解码兼容性。
+- 已完成独立点播及原生界面复刻；语音输入仍延后，搜索/解析业务暂由不可见数据页复用。
+
+## Media3 原生播放
+
+APK 0.2.0 引入原生视频层，支持 HLS、原始比例/裁切、倍速、快进、选集、换源、进度恢复、后台暂停及错误反馈。控制栏、焦点和透明缓冲网速提示保持现有电视样式。原生下载请求与 Cookie 处理见 [播放协议](PLAYBACK_PROTOCOL.md)。
+
+Media3 固定为与当前 compileSdk 35 / AGP 8.7 兼容的 1.8.1，使用解码器回退。是否支持特定 4K/HDR 编码仍需实机验证。原生播放尚未使用网页分片缓存和外挂字幕选择。
+
+验证命令（在 `android-tv` 目录）：
+
+```bash
+./gradlew assembleDebug testDebugUnitTest lintDebug
+```
 
 ## 电视播放页
 
@@ -43,24 +49,45 @@ APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 | 菜单 / 设置（电脑 F2） | 打开倍速、完整显示 / 裁切铺满、自动连播、广告过滤设置 |
 | 返回 | 先关闭面板或取消进度预览，再收起控制栏，最后退出播放 |
 
-这套按键需要新版 APK；换源和切集均保留电视播放模式。首页菜单键仍用于修改服务器地址。
+这套按键需要新版 APK；换源和切集均保留电视播放模式。首页菜单键打开片源管理。
 
 # 本地电视模拟器
 
-已配置的本机调试环境使用 Android 11（API 30）与 1920×1080 电视配置。先在项目根目录启动 LibreTV 服务：
-
-```bash
-./start_local.sh
-```
-
-另开一个终端，运行：
+已配置的本机调试环境使用 Android 11（API 30）与 1920×1080 电视配置。独立版直接运行：
 
 ```bash
 ./android-tv/run_local_tv_emulator.sh
 ```
 
-脚本会启动或复用 `LibreTV-TV-API30` 模拟器，把模拟器的 `8080` 转发到本机服务，构建调试 APK 并安装启动。模拟器的 SDK 和 AVD 都保存在 `android-tv/.android-sdk/` 与 `android-tv/.android-avd/`，不会提交到 Git。
-
-`start_local.sh` 默认关闭服务端密码验证，新安装的 App 和模拟器无需登录 Cookie 即可搜索播放。若用其他方式启动服务，可显式设置 `AUTH_DISABLED=true`。
+脚本会启动或复用 `LibreTV-TV-API30` 模拟器，清理旧版 `8080` 端口转发，构建调试 APK 并安装启动。模拟器的 SDK 和 AVD 都保存在 `android-tv/.android-sdk/` 与 `android-tv/.android-avd/`，不会提交到 Git。
 
 新启动的模拟器开启硬件键盘和按键直通，设置单独保存在 `android-tv/.emulator-config/`。单击模拟器画面后，电脑方向键可用于遥控器导航，Enter 用于确认。首次应用这些设置需要关闭旧模拟器并重新运行脚本。脚本启动新模拟器时需保持终端打开，关闭模拟器窗口后脚本结束。
+
+## 原生预览回归
+
+在原生预览中打开一部可正常播放的视频后执行（需要 Node.js 22）：
+
+```bash
+node android-tv/scripts/check-native-playback.mjs --serial emulator-5554
+```
+
+通过 `--serial` 可选择 `adb devices` 中的投影仪，`--report /tmp/native-tv-report.json` 可保存检查结果。脚本验证控制栏焦点、进度预览与提交、倍速、画面比例、选集及返回行为；结束时恢复测试前的进度、倍速、比例和暂停状态。实机验证记录见 [原生 UI 迁移](NATIVE_UI_MIGRATION.md)。
+
+## 超分开关与来源缓存（0.4.3）
+
+首页进入“片源管理”可切换“AI 超分（电脑串流）”；电脑串流播放时也可从“设置 → AI 超分”切换并按原片进度重新准备。开启默认升一档，关闭保持原始分辨率；去广告独立控制，设置自动保存。需同时运行新版电脑服务。
+
+换源列表近期结果直接从本地显示，过期后后台刷新，按“刷新来源”可立即重新检测。搜索结果缓存 10 分钟，换源结论缓存 5 分钟，重启应用仍可复用。缓存有容量上限，不能保证被淘汰或源配置变更后的条目仍命中。
+
+真实来源缓存检查（不修改片源配置，测试会重启应用）：
+
+```bash
+node android-tv/scripts/check-source-cache.mjs emulator-5554
+```
+
+
+## 换源大列表显示修正（0.4.5）
+
+播放中的换源面板固定标题和底部提示，左右两栏独立滚动。来源卡片和焦点光晕都限制在左侧视口内，避免来源多时覆盖页脚；正文使用可用高度，顶部刷新与返回按钮对齐。右侧操作可通过列表末列的右键进入，左键回到原来源，浏览不触发播放。
+
+模拟器大列表截图与滚动检查：`node android-tv/scripts/check-source-layout.mjs`（仅模拟器；合成 37 个来源，不写入配置或历史，结束清理替身）。

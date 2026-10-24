@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '@/lib/client-api';
-import { QUALITY_FAIL_TTL_MS, isRetryableTimeout, qualityKey, summarizeQuality } from '@/lib/quality';
+import { QUALITY_FAIL_TTL_MS, isQualityEntryFresh, isRetryableTimeout, qualityKey, summarizeQuality } from '@/lib/quality';
 import { createProbeQueue, type ProbeQueue } from '@/lib/quality-probe-queue';
 import { readQualities, useAppStore } from '@/lib/store';
 import type { QualityEntry, QualityProbeItem, QualityProbeResult, SourceConfig } from '@/lib/types';
@@ -188,7 +188,7 @@ export function useQualityProbe(sources?: SourceConfig[]) {
         if (force) return true;
         const known = cached[key] ?? qualitiesRef.current[key];
         // 已有结论（含「测不出」）是终态，重探还是同一个结果
-        if (known && !known.error) return false;
+        if (known && isQualityEntryFresh(known)) return false;
         const last = settledRef.current.get(key);
         return last === undefined || now - last > QUALITY_FAIL_TTL_MS;
       });
@@ -291,7 +291,7 @@ export function useQualityProbe(sources?: SourceConfig[]) {
         const key = qualityKey(target.sourceKey, target.vodId);
         if (inflightRef.current.has(key)) return false;
         const known = cached[key];
-        if (known && !known.error) return false;
+        if (known && isQualityEntryFresh(known)) return false;
         const last = settledRef.current.get(key);
         return last === undefined || now - last > QUALITY_FAIL_TTL_MS;
       });

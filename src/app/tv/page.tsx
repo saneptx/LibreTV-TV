@@ -10,6 +10,8 @@ import { SmartImage } from '@/components/smart-image';
 import { useSearchHistory } from '@/components/search-history';
 import { buildWatchUrl, validateSourceUrl } from '@/lib/utils';
 import styles from './tv.module.css';
+import { getNativeHttpBridge } from '@/lib/native-http';
+import { TvSourceSettings } from '@/components/tv-source-settings';
 
 const FOCUS_SELECTOR = '[data-tv-focus]:not([disabled])';
 const RESULT_PAGE_SIZE = 72;
@@ -78,6 +80,9 @@ function useDpadNavigation(onBack: () => boolean, getScope: () => ParentNode | n
 export default function TvPage() {
   const router = useRouter();
   const store = useAppStore();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [standalone, setStandalone] = useState(false);
+  const closeSettings = useCallback(() => { setSettingsOpen(false); requestAnimationFrame(() => searchInput.current?.focus()); }, []);
   const [query, setQuery] = useState('');
   const [searched, setSearched] = useState('');
   const [items, setItems] = useState<SearchResultItem[]>([]);
@@ -124,7 +129,17 @@ export default function TvPage() {
     return true;
   }, [selectedGroup]);
   const dialogScope = useCallback(() => document.querySelector<HTMLElement>('[data-tv-dialog]'), []);
-  useDpadNavigation(closePanel, dialogScope);
+  const onBack = useCallback(() => {
+    if (settingsOpen) { closeSettings(); return true; }
+    return closePanel();
+  }, [settingsOpen, closeSettings, closePanel]);
+  useDpadNavigation(onBack, dialogScope);
+  useEffect(() => {
+    setStandalone(Boolean(getNativeHttpBridge()));
+    const open = () => setSettingsOpen(true);
+    window.addEventListener('libretv-tv-settings', open);
+    return () => window.removeEventListener('libretv-tv-settings', open);
+  }, []);
 
   // 投影仪 WebView 会把确认键用于原生焦点而不触发网页 button 的 click。原生壳
   // 发送该事件后，直接依据当前焦点执行操作，避免依赖不稳定的模拟点击。
@@ -142,7 +157,7 @@ export default function TvPage() {
   }, [groups, openGroup]);
 
   useEffect(() => {
-    focusFirst();
+    requestAnimationFrame(() => searchInput.current?.focus());
     return () => searchAbort.current?.abort();
   }, []);
 
@@ -179,7 +194,7 @@ export default function TvPage() {
     const keyword = text.trim().slice(0, 100);
     if (!keyword) {
       setMessage('请输入片名');
-      focusFirst();
+      searchInput.current?.focus();
       return;
     }
     if (sources.length === 0) {
@@ -239,12 +254,15 @@ export default function TvPage() {
 
   return (
     <main className={styles.page}>
+      {settingsOpen && <TvSourceSettings onClose={closeSettings} />}
       <header className={styles.header}>
         <div>
-          <span className={styles.eyebrow}>TV MODE</span>
+          <span className={styles.eyebrow}>{standalone ? store.playbackMode === 'desktop' ? '电脑串流 · ANDROID TV' : '独立运行 · ANDROID TV' : 'TV MODE'}</span>
           <h1>LibreTV</h1>
         </div>
-        <div className={styles.sourceCount}>{sources.length} 个来源已启用</div>
+        <div className={styles.sourceCount}>{sources.length} 个来源已启用
+          {standalone && <button data-tv-focus type="button" className={styles.close} style={{ marginLeft: '2vw' }} onClick={() => setSettingsOpen(true)}>片源管理</button>}
+        </div>
       </header>
 
       <form className={styles.search} onSubmit={submit}>

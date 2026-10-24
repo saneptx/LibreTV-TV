@@ -162,3 +162,6 @@ body {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
   50% { opacity: 0.55; box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
 }
+
+/* 原生视频位于 WebView 下层，只有播放页透出画面。 */
+html[data-native-playback], html[data-native-playback] body { background: transparent !important; }

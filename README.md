@@ -1,6 +1,8 @@
 # LibreTV
 
-LibreTV Next.js 迁移版：免费在线视频聚合搜索与观看平台。基于 Next.js 15（App Router）+ TypeScript + Tailwind CSS，播放内核为 ArtPlayer + hls.js，支持亮暗双主题。
+LibreTV-TV：在 LibreTV Next.js 迁移版基础上，增加 Android TV / 投影仪独立 App、原生电视界面与可选的电脑增强串流。网页端基于 Next.js 15（App Router）+ TypeScript + Tailwind CSS，使用 ArtPlayer + hls.js；Android 端使用 Media3 解码播放。
+
+当前 Android APK 版本为 **0.4.5**，网页版本为 **2.19.6**。电视使用与启动方法见下方 [Android TV / 投影仪](#android-tv--投影仪)。
 
 > 🏠 **官网**：[LibreTV 官网](https://libretv.is-an.org/)
 >
@@ -24,6 +26,25 @@ LibreTV Next.js 迁移版：免费在线视频聚合搜索与观看平台。基�
 - **源测试与订阅**：一键探活点播源与直播源（支持批量测活）；搜索时自动记录各源健康度，连续失败的源按阶梯时长自动停用（30 分钟 → 24 小时 → 长期），可一键恢复；订阅远程源列表（一份 LibreTV-SourceList JSON 可同时下发点播源与直播源，也可直接填 TVBOX 配置地址，自动导入其中可直接使用的接口），可导出分享
 - **首页推荐**：豆瓣（电影/剧集分类浏览）、Bangumi 新番放送表或影视榜单（豆瓣周榜 + 百度热播，经 60s API），设置中切换；均服务端直连 + 缓存，Bangumi/榜单免 key 免配置（`60S_API_BASE` 可指向自部署 60s 实例）
 - **PWA**：可安装到桌面 / 主屏幕，亮暗双主题无首屏闪烁
+
+## 本分支的 TV / 投影仪改动
+
+- **独立运行**：界面随 APK 打包，设备直接搜索片源、获取详情和播放，无需电脑服务器，也无需 App 登录密码。片源、搜索历史和观看进度保存在设备本地，覆盖安装可保留数据。
+- **原生电视操作**：首页、选集、换源、设置与播放器使用 Android 控件和 Media3，沿用原有界面与遥控器逻辑；支持透明缓冲提示和实时接收网速。搜索、解析及 IndexedDB 暂由包内不可见的数据页复用，语音输入仍待实现。
+- **可选电脑串流**：仍在 App 内搜索、选片，开始播放后由电脑读取片源，过滤明确标记的广告分片、超分、编码，再将 HLS 发送给电视。最终解码和显示仍在电视 / 投影仪上。
+- **超分开关与标注**：开启后默认只升一档，例如 720P → 1080P、1080P → 4K，已有 4K 保持；关闭后保留原始分辨率，广告过滤独立控制。播放页标注原始/输出尺寸、实际超分状态及实际删除的广告分片数量。
+- **搜索与换源缓存**：设备搜索结果缓存 10 分钟，换源结论缓存 5 分钟并持久化；过期换源列表先显示缓存再后台刷新，也可手动“刷新来源”。换源按原始分辨率优先排序，更新结果时保留所选来源和焦点。
+- **0.4.4–0.4.5 界面修复**：统一桌面与模拟器启动入口；换源左右栏独立滚动，修复来源较多时卡片、焦点光晕覆盖页脚，以及最后一项底边被裁切的问题。
+
+电脑去广告目前只处理可识别的 HLS 广告分片，不处理画面内嵌广告、台标或水印。4K 处理速度取决于片源、帧率、显卡和网络，不能保证所有视频实时播放。
+
+| 使用方式 | 电脑需要运行什么 | 设备上的操作 |
+| --- | --- | --- |
+| App 独立直连（默认） | 无需电脑服务 | 安装 APK，直接搜索播放 |
+| App 电脑串流 | 8090 电脑串流服务 | 片源管理 → 填写电脑地址与配对码 → 电脑串流 |
+| 电脑浏览器 | 8080 Next.js 网页服务 | 浏览器打开 `http://localhost:8080` |
+
+详细实现与验证见 [Android TV 说明](android-tv/README.md)、[播放协议](android-tv/PLAYBACK_PROTOCOL.md)、[界面迁移记录](android-tv/NATIVE_UI_MIGRATION.md)及[电脑串流说明](desktop-server/README.md)。以下 Docker / 网页部署说明仍适用于网页端。
 
 ## 部署
 
@@ -73,7 +94,7 @@ docker compose pull && docker compose up -d
 两个 registry 的镜像 digest 一致）。需要固定版本时在 `.env` 中设置
 `LIBRETV_IMAGE=ghcr.io/librespark/libretv:2.0.1`。
 
-> 版本号以 `package.json` 为单一来源，部署后可用 `/api/status` 返回的 `version` 字段核对。详见[部署文档](https://libretv.is-an.org/wiki/Deployment.html)。
+> 网页服务的版本号以 `package.json` 为来源，部署后可用 `/api/status` 返回的 `version` 字段核对；Android APK 版本在 `android-tv/app/build.gradle.kts` 中单独维护。详见[部署文档](https://libretv.is-an.org/wiki/Deployment.html)。
 
 ### 手动运行
 
@@ -93,7 +114,7 @@ kill "$(cat .start_local.pid)"          # 服务启动完成后停止服务
 
 后台命令返回表示已创建进程；是否启动成功请查看日志。重复启动会检查 PID，日志在每次后台启动时覆盖。
 
-`start_local.sh` 默认设置 `AUTH_DISABLED=true`，电脑网页、电视 App 和模拟器均免登录，所有能访问该服务的客户端都能使用。恢复密码验证时运行 `AUTH_DISABLED=false PASSWORD=your-password ./start_local.sh`。普通 `npm start` / Docker 部署默认仍开启验证。
+`start_local.sh` 默认设置 `AUTH_DISABLED=true`，所有能访问 8080 网页服务的客户端均免登录。恢复网页密码验证时运行 `AUTH_DISABLED=false PASSWORD=your-password ./start_local.sh`。普通 `npm start` / Docker 部署默认仍开启验证。此开关仅影响网页服务；独立 App 本身无需登录，电脑串流的配对码另行配置。
 
 也可以分别安装、构建和启动：
 
@@ -105,16 +126,92 @@ PASSWORD=your-password npm start   # 监听 8080
 
 ### Android TV / 投影仪
 
-`android-tv/` 是可侧载到 Android TV、电视盒子和安卓投影仪的 WebView 客户端。先让 LibreTV 服务在电视可访问的局域网设备或服务器上运行，再按该目录的说明构建并安装 APK：
+#### 1. 构建并安装独立 App
+
+需要 Node.js 22.16+、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。`JAVA_HOME` 指向 JDK 17；SDK 路径通过 `ANDROID_HOME` 或 `android-tv/local.properties` 的 `sdk.dir` 配置。本机 SDK、AVD 和构建产物均不提交到 Git，新电脑需先配置环境。
+
+在项目根目录执行：
 
 ```bash
-cd android-tv
-./gradlew assembleDebug
+npm ci --include=dev
+./android-tv/gradlew -p android-tv :app:assembleDebug
 ```
 
-首次打开 App 时，用遥控器输入服务器地址，例如 `192.168.1.10:8080`；App 会自动打开 `/tv`。按遥控器菜单或设置键可修改地址。完整构建与使用说明见 [Android TV 客户端说明](android-tv/README.md)。
+APK 输出：`android-tv/app/build/outputs/apk/debug/app-debug.apk`。也可将 APK 复制到电视 / 投影仪上侧载安装。
+
+已在投影仪开启 ADB 调试，并与电脑处于同一局域网时，可覆盖安装并启动（示例 IP 请替换为设备实际地址）：
+
+```bash
+PROJECTOR_IP=192.168.1.20
+adb connect "${PROJECTOR_IP}:5555"
+adb -s "${PROJECTOR_IP}:5555" install -r android-tv/app/build/outputs/apk/debug/app-debug.apk
+adb -s "${PROJECTOR_IP}:5555" shell am start -n org.libretv.tv/.MainActivity
+```
+
+ADB 若不在 PATH，可使用 `android-tv/.android-sdk/platform-tools/adb`。设备重启后 IP 可能变化，可查看网络设置，或用 `adb mdns services` 查找广播的 ADB 地址。
+
+首次打开即进入原生电视首页，默认“独立直连”。在首页“片源管理”或遥控器菜单键中管理片源，然后搜索播放；**无需启动 `start_local.sh`，也无需填写电脑地址**。升级请使用覆盖安装，卸载或清除应用数据会删除本地设置与记录。完整说明见 [Android TV 说明](android-tv/README.md)。
+
+#### 2. 启动可选的电脑增强串流
+
+当前增强环境验证基于 Ubuntu 24 x64、支持 Vulkan 的 NVIDIA GPU，以及包含 `libplacebo` 和 `h264_nvenc` 的 FFmpeg 6+。默认使用 FSRCNNX 超分与 NVENC 编码。首次配置会下载模型并检测工具；没有系统 FFmpeg 时，配置脚本会尝试在项目目录解包 Ubuntu 软件包。
+
+在项目根目录执行：
+
+```bash
+# 首次准备依赖；已完成 npm ci 的环境无需重复安装 npm 依赖
+npm run desktop:setup
+
+# 投影仪连接：监听局域网，默认端口 8090；前台运行，Ctrl+C 停止
+npm run desktop:server -- --host 0.0.0.0
+```
+
+电脑和投影仪需要处于可互访的局域网，防火墙允许 TCP 8090。App 的“片源管理”中：
+
+1. 填写**电脑**地址，例如 `http://192.168.1.10:8090`；模拟器填写 `http://10.0.2.2:8090`。
+2. 从电脑 `.desktop-server/config.json` 读取 `token`，填入“电脑服务配对码”，选择“保存并测试”。该文件由服务首次启动自动生成，已加入 Git 忽略，请勿公开配对码。
+3. 选择“电脑串流”，仍在 App 内搜索、选片；电脑只接手播放处理，不需要手动推流。
+4. “AI 超分”可在片源管理或电脑串流播放设置中开关；默认开启并升一档。去广告独立控制，结果以播放页实际标注为准。
+
+8090 服务与 8080 网页服务独立，电脑串流无需启动 Next.js。单独执行 `npm run desktop:server` 默认只监听 `127.0.0.1`，适用于本机和 Android 模拟器，投影仪应使用上面的 `--host 0.0.0.0`。
+
+如果本机代理把片源域名解析为 `198.18.0.0/15` 的 Fake-IP，可改用：
+
+```bash
+npm run desktop:server -- --host 0.0.0.0 --allow-fake-ip
+```
+
+后台运行可使用下面的命令；与前台启动二选一，避免重复占用 8090：
+
+```bash
+mkdir -p .desktop-server
+nohup node desktop-server/start.mjs --host 0.0.0.0 \
+  > .desktop-server/server.log 2>&1 < /dev/null &
+echo $! > .desktop-server/server.pid
+
+tail -f .desktop-server/server.log       # 查看日志，Ctrl+C 仅退出查看
+kill "$(cat .desktop-server/server.pid)" # 停止该后台服务
+```
+
+需要 Fake-IP 兼容时，也要在后台命令中加入 `--allow-fake-ip`。重启电脑服务后，已有播放任务需在 App 中重试。只测试原画转发时可用 `npm run desktop:server -- --host 0.0.0.0 --processing relay`，该模式不去广告、不超分；仅关闭超分并保留去广告时，请使用正常增强服务和 App 内的超分开关。
+
+模型、固定分辨率参数、缓存和性能限制见 [电脑串流说明](desktop-server/README.md)。
+
+#### 3. 在本地电视模拟器中调试
+
+已配置项目本地 SDK 和 `LibreTV-TV-API30` AVD 后，在项目根目录执行：
+
+```bash
+./android-tv/run_local_tv_emulator.sh
+```
+
+脚本启动或复用 Android 11 / 1080P 模拟器，构建、覆盖安装 APK 并进入与投影仪相同的原生界面。不会自动启动 8080 或 8090 服务；测试电脑串流时另开终端启动 8090 服务。首次准备的 SDK / AVD 位于 `android-tv/.android-sdk/`、`android-tv/.android-avd/`，新电脑需单独配置；脚本不会自动下载系统镜像或创建 AVD。
+
+单击模拟器画面后用方向键导航，Enter 确认，Esc / 返回键逐层返回；播放中左右键预览跳转、确认后生效，下键打开控制栏。脚本新建模拟器时需保持终端打开，关闭模拟器窗口后脚本结束。`--native-preview` 旧参数仍兼容；`--legacy-web` 仅用于调试对照旧网页界面。
 
 ### 环境变量
+
+下表用于 8080 网页服务。独立 APK 不依赖这些环境变量；8090 电脑串流使用上方命令行参数和独立配对配置。
 
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
@@ -239,7 +336,7 @@ npm run typecheck
 
 ## 发布新版本
 
-版本号以 `package.json` 为单一来源，发布镜像由 GitHub Actions 自动完成：
+网页镜像版本号以 `package.json` 为来源，发布镜像由 GitHub Actions 自动完成；Android 版本需单独更新 `android-tv/app/build.gradle.kts` 中的 `versionCode` / `versionName` 并重新构建 APK：
 
 ```bash
 npm version patch       # 或 minor / major；会更新 package.json 并打 git tag
@@ -250,7 +347,7 @@ CI 校验通过后自动构建并推送 `ghcr.io/librespark/libretv:<版本>`（
 
 ## 安全说明
 
-- 密码只保存在服务端环境变量中，前端不持有任何可重放凭证。
+- 网页访问密码保存在服务端环境变量中；独立 App 无需登录。电脑串流配对码由电脑生成并保存在已配对的设备本地，请勿公开或写入媒体 URL。
 - 登录接口有 IP 速率限制（10 次 / 10 分钟）。
 - 代理内置 SSRF 防护：拒绝内网/保留地址（含 DNS 解析后校验），仅放行 http(s)。
 - 未登录会话仅允许代理图片类目标（豆瓣封面防盗链需要）。

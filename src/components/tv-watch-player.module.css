@@ -18,6 +18,7 @@
 .brand { font-size: 1vw; letter-spacing: .22em; color: #9eabb9; }
 .top h1 { margin: .7vh 0 1vh; font-size: 2.7vw; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 82vw; }
 .subtitle { font-size: 1.25vw; color: #c0c6d0; }
+.processing { margin-top: 1vh; font-size: 1.1vw; line-height: 1.7; color: #a8dce6; text-shadow: 0 .1vw .3vw #000; }
 .bottom { position: absolute; z-index: 4; left: 0; right: 0; bottom: 0; padding: 11vh 5vw 4vh; background: linear-gradient(transparent, #000e 45%, #000f); }
 .timeline { display: flex; align-items: center; width: 100%; margin-bottom: 3vh; }
 .time { font-size: 1.25vw; font-variant-numeric: tabular-nums; white-space: nowrap; color: #d2d7df; }
@@ -57,3 +58,5 @@
 .button[aria-pressed='true'] { border-color: #53e3ed; color: #53e3ed; background: #34ced51f; }
 .button[aria-pressed='true']:focus { color: #081620; background: #e9fbff; }
 .sourceModal { position: absolute; z-index: 8; top: 0; right: 0; bottom: 0; left: 0; }
+.screen[data-tv-engine='native'] { background: transparent; }
+.desktopError { position: absolute; inset: 0; z-index: 12; display: flex; flex-direction: column; gap: 3vh; align-items: center; justify-content: center; padding: 5vw; text-align: center; background: #000e; }

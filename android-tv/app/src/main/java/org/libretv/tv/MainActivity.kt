@@ -3,7 +3,6 @@ package org.libretv.tv
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Color
-import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
@@ -17,21 +16,32 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
-import java.net.URI
+import android.graphics.Bitmap
+import android.widget.FrameLayout
+import androidx.media3.common.util.UnstableApi
 
-/** 电视端只承载界面，搜索、鉴权和代理仍由用户部署的 LibreTV 服务提供。 */
+/** 电视界面随 APK 分发，搜索和播放均由设备直接访问网络。 */
+@UnstableApi
 class MainActivity : Activity() {
     private var webView: WebView? = null
+    private var nativePlayer: NativePlayerHost? = null
+    private var standalone: StandaloneHost? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 桌面图标、模拟器和退出重开使用同一套已复刻的电视界面。
+        // 旧网页入口仅保留给调试时显式对照，不能因少了预览参数而自动切回。
+        if (!(BuildConfig.DEBUG && intent.getBooleanExtra("legacy_web_ui", false))) {
+            startActivity(android.content.Intent(this, NativeTvActivity::class.java).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            })
+            finish(); return
+        }
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         hideSystemBars()
-        if (serverUrl() == null) showServerSetup() else showWebView()
+        showWebView()
     }
 
     private fun hideSystemBars() {
@@ -44,124 +54,83 @@ class MainActivity : Activity() {
 
     private fun serverUrl(): String? = getSharedPreferences(PREFERENCES, MODE_PRIVATE).getString(SERVER_URL_KEY, null)
 
-    private fun normaliseServerUrl(value: String): String? {
-        return try {
-            var candidate = value.trim().trimEnd('/')
-            if (candidate.isEmpty()) return null
-            if (!candidate.startsWith("http://") && !candidate.startsWith("https://")) candidate = "http://$candidate"
-            val uri = URI(candidate)
-            if (uri.scheme !in setOf("http", "https") || uri.host.isNullOrBlank()) return null
-            if (uri.path.trimEnd('/') == "/tv") candidate else "$candidate/tv"
-        } catch (_: Exception) {
-            null
-        }
-    }
+    // 保留旧版 origin，可直接继续使用原来的 IndexedDB、收藏、进度和 localStorage。
+    // 页面完全由 APK 拦截返回，不再连接这个地址，也不在设备监听端口。
+    private fun localOrigin() = localPageOrigin(serverUrl() ?: BuildConfig.LIBRETV_URL)
 
-    private fun showServerSetup(message: String? = null) {
-        webView?.destroy()
-        webView = null
-        val density = resources.displayMetrics.density
-        fun dp(value: Int) = (value * density).toInt()
+    private fun showLocalError(message: String) {
+        standalone?.release(); standalone = null
+        nativePlayer?.release(); nativePlayer = null
+        webView?.destroy(); webView = null
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(64), dp(32), dp(64), dp(32))
+            gravity = Gravity.CENTER
+            setPadding(64, 32, 64, 32)
             setBackgroundColor(Color.rgb(7, 16, 29))
+            addView(TextView(this@MainActivity).apply {
+                text = "无法打开本地界面：$message"; textSize = 22f; setTextColor(Color.WHITE)
+            })
+            addView(Button(this@MainActivity).apply { text = "重试"; setOnClickListener { showWebView() } })
         }
-        val title = TextView(this).apply {
-            text = "连接 LibreTV 服务"
-            setTextColor(Color.rgb(244, 248, 255))
-            textSize = 30f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        val description = TextView(this).apply {
-            text = "请输入运行 LibreTV 的电脑、NAS 或服务器地址。电视和服务器需要能够互相访问。"
-            setTextColor(Color.rgb(170, 190, 214))
-            textSize = 18f
-            setPadding(0, dp(16), 0, dp(20))
-        }
-        val address = EditText(this).apply {
-            hint = "例如：192.168.1.10:8080"
-            setSingleLine(true)
-            textSize = 20f
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.rgb(115, 139, 165))
-            setBackgroundColor(Color.rgb(20, 37, 57))
-            setPadding(dp(18), dp(8), dp(18), dp(8))
-            setText(serverUrl()?.removeSuffix("/tv") ?: BuildConfig.LIBRETV_URL.removeSuffix("/tv"))
-        }
-        val error = TextView(this).apply {
-            text = message.orEmpty()
-            setTextColor(Color.rgb(255, 133, 146))
-            textSize = 16f
-            setPadding(0, dp(12), 0, 0)
-            visibility = if (message == null) View.GONE else View.VISIBLE
-        }
-        val save = Button(this).apply {
-            text = "保存并连接"
-            textSize = 20f
-            isAllCaps = false
-            setOnClickListener {
-                val url = normaliseServerUrl(address.text.toString())
-                if (url == null) {
-                    error.text = "请输入有效地址，例如 http://192.168.1.10:8080"
-                    error.visibility = View.VISIBLE
-                    address.requestFocus()
-                    return@setOnClickListener
-                }
-                getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putString(SERVER_URL_KEY, url).apply()
-                showWebView()
-            }
-        }
-        content.addView(title)
-        content.addView(description)
-        content.addView(address, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)))
-        content.addView(error)
-        content.addView(save, LinearLayout.LayoutParams(dp(220), dp(64)).apply { topMargin = dp(22) })
-        setContentView(ScrollView(this).apply { addView(content) })
-        address.requestFocus()
+        setContentView(content)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun showWebView() {
-        val url = serverUrl() ?: return showServerSetup()
+        val url = "${localOrigin()}/tv"
         try {
             val cookies = CookieManager.getInstance()
             cookies.setAcceptCookie(true)
             webView = WebView(this).apply {
+                setBackgroundColor(Color.TRANSPARENT)
                 isFocusable = true
                 isFocusableInTouchMode = true
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
-                settings.userAgentString = "${settings.userAgentString} LibreTV-AndroidTV/0.1"
+                settings.userAgentString = "${settings.userAgentString} LibreTV-AndroidTV/0.3"
                 cookies.setAcceptThirdPartyCookies(this, true)
                 webChromeClient = WebChromeClient()
                 webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = false
+                    override fun onPageStarted(view: WebView, nextUrl: String, favicon: Bitmap?) {
+                        nativePlayer?.stop()
+                        standalone?.cancelRequests()
+                    }
+                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                        if (!request.isForMainFrame) return false
+                        val path = request.url.path?.trimEnd('/')
+                        return standalone?.sameOrigin(request.url) != true || path !in setOf("", "/tv", "/watch")
+                    }
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                        standalone?.intercept(request)
 
                     override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
-                        if (request.isForMainFrame) view.post { showServerSetup("无法连接到服务器：${error.description}") }
+                        if (request.isForMainFrame) view.post { showLocalError(error.description.toString()) }
                     }
 
                     override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                         if (request.isForMainFrame && response.statusCode >= 500) {
-                            view.post { showServerSetup("服务器返回 ${response.statusCode}，请确认 LibreTV 已启动") }
+                            view.post { showLocalError("本地资源返回 ${response.statusCode}") }
                         }
                     }
                 }
-                loadUrl(url)
                 requestFocus()
             }
-            setContentView(webView)
+            val currentWeb = webView ?: return
+            standalone = StandaloneHost(this, currentWeb, localOrigin())
+            nativePlayer = NativePlayerHost(this, currentWeb, url)
+            setContentView(nativePlayer!!.container.apply {
+                addView(currentWeb, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            })
+            currentWeb.loadUrl(url)
         } catch (error: Exception) {
-            showServerSetup("无法启动内置浏览器（${error.javaClass.simpleName}）。请检查投影仪的 Android System WebView 是否已启用并更新。")
+            showLocalError("无法启动内置浏览器（${error.javaClass.simpleName}），请检查 Android System WebView 是否已启用。")
         }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SETTINGS) {
-            showServerSetup()
+            webView?.evaluateJavascript("window.dispatchEvent(new CustomEvent('libretv-tv-settings'));", null)
             return true
         }
         val currentWebView = webView
@@ -233,7 +202,7 @@ class MainActivity : Activity() {
         }
         // 消费 key-up，避免 WebView 在 key-down 转发完成后再次处理该按键。
         if (event.action != KeyEvent.ACTION_DOWN) return true
-        val script = """(function(){var nodes=Array.prototype.slice.call(document.querySelectorAll('[data-tv-focus]:not([disabled])')).filter(function(n){return n.offsetParent!==null});if(!nodes.length)return;var active=document.activeElement;if(nodes.indexOf(active)<0){nodes[0].focus();return;}var from=active.getBoundingClientRect(),fx=from.left+from.width/2,fy=from.top+from.height/2,h='$key'==='ArrowLeft'||'$key'==='ArrowRight',best=null;nodes.forEach(function(n){if(n===active)return;var r=n.getBoundingClientRect(),dx=r.left+r.width/2-fx,dy=r.top+r.height/2-fy,valid=('$key'==='ArrowRight'&&dx>8)||('$key'==='ArrowLeft'&&dx<-8)||('$key'==='ArrowDown'&&dy>8)||('$key'==='ArrowUp'&&dy<-8);if(!valid)return;var score=(h?Math.abs(dx):Math.abs(dy))+(h?Math.abs(dy):Math.abs(dx))*2.4;if(!best||score<best.score)best={node:n,score:score};});if(best){best.node.focus({preventScroll:true});best.node.scrollIntoView({block:'nearest',inline:'nearest'});}})();"""
+        val script = """(function(){var scope=document.querySelector('[data-tv-dialog]')||document;var nodes=Array.prototype.slice.call(scope.querySelectorAll('[data-tv-focus]:not([disabled])')).filter(function(n){return n.offsetParent!==null});if(!nodes.length)return;var active=document.activeElement;if(nodes.indexOf(active)<0){nodes[0].focus();return;}var from=active.getBoundingClientRect(),fx=from.left+from.width/2,fy=from.top+from.height/2,h='$key'==='ArrowLeft'||'$key'==='ArrowRight',best=null;nodes.forEach(function(n){if(n===active)return;var r=n.getBoundingClientRect(),dx=r.left+r.width/2-fx,dy=r.top+r.height/2-fy,valid=('$key'==='ArrowRight'&&dx>8)||('$key'==='ArrowLeft'&&dx<-8)||('$key'==='ArrowDown'&&dy>8)||('$key'==='ArrowUp'&&dy<-8);if(!valid)return;var score=(h?Math.abs(dx):Math.abs(dy))+(h?Math.abs(dy):Math.abs(dx))*2.4;if(!best||score<best.score)best={node:n,score:score};});if(best){best.node.focus({preventScroll:true});best.node.scrollIntoView({block:'nearest',inline:'nearest'});}})();"""
         webView?.evaluateJavascript(script, null)
         return true
     }
@@ -242,14 +211,20 @@ class MainActivity : Activity() {
         super.onResume()
         hideSystemBars()
         webView?.onResume()
+        nativePlayer?.resumeForLifecycle()
     }
 
     override fun onPause() {
+        nativePlayer?.pauseForLifecycle()
         webView?.onPause()
         super.onPause()
     }
 
     override fun onDestroy() {
+        standalone?.release()
+        standalone = null
+        nativePlayer?.release()
+        nativePlayer = null
         webView?.destroy()
         webView = null
         super.onDestroy()

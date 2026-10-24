@@ -13,6 +13,7 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.LibreTV.TV"
         android:usesCleartextTraffic="true">
+        <activity android:name=".NativeTvActivity" android:exported="false" android:screenOrientation="landscape" />
         <activity
             android:name=".MainActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|smallestScreenSize"

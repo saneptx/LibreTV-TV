@@ -1,5 +1,7 @@
 'use client';
 
+import { getNativeHttpBridge } from './native-http';
+
 import type { SearchResponse, SearchStreamEvent, SourceSearchOutcome, VideoDetail, DoubanResponse, BangumiCalendarResponse, AuthStatusResponse, SourceConfig, SearchResultItem, LivePlaylistResponse, LiveEpgResponse, SourceListPayload, QualityProbeItem, QualityProbeResult } from './types';
 
 /**
@@ -106,7 +108,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  status: () => request<AuthStatusResponse>('/api/status'),
+  status: () => getNativeHttpBridge()
+    ? import('./standalone-api').then((m) => m.standaloneStatus())
+    : request<AuthStatusResponse>('/api/status'),
 
   login: (password: string) =>
     request<{ success: boolean }>('/api/auth', {
@@ -126,23 +130,26 @@ export const api = {
     wd: string,
     sources: SourceConfig[],
     filterAdult: boolean,
-    opts?: { signal?: AbortSignal; onSource?: (outcome: SourceSearchOutcome) => void }
+    opts?: { forceRefresh?: boolean; signal?: AbortSignal; onSource?: (outcome: SourceSearchOutcome) => void }
   ): Promise<SearchResponse> => {
+    if (getNativeHttpBridge()) return (await import('./standalone-api')).standaloneSearch(wd, sources, filterAdult, opts);
     const signal = opts?.signal;
     const onSource = opts?.onSource;
     if (!onSource) {
       return request<SearchResponse>('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wd, sources, filterAdult }),
+        body: JSON.stringify({ wd, sources, filterAdult, forceRefresh: opts?.forceRefresh }),
         signal,
       });
     }
-    return searchStream(wd, sources, filterAdult, onSource, signal);
+    return searchStream(wd, sources, filterAdult, onSource, signal, opts?.forceRefresh);
   },
 
-  detail: (id: string, source: SourceConfig, signal?: AbortSignal) => {
+  detail: (id: string, source: SourceConfig, signal?: AbortSignal, opts?: { forceRefresh?: boolean }) => {
+    if (getNativeHttpBridge()) return import('./standalone-api').then((m) => m.standaloneDetail(id, source, signal, opts));
     const sp = new URLSearchParams({ id, source: JSON.stringify(source) });
+    if (opts?.forceRefresh) sp.set('refresh', '1');
     return request<VideoDetail>(`/api/detail?${sp.toString()}`, { signal });
   },
 
@@ -159,6 +166,11 @@ export const api = {
     onResult: (result: QualityProbeResult) => void,
     signal?: AbortSignal
   ): Promise<void> => {
+    if (getNativeHttpBridge()) {
+      const { mapConcurrent, standaloneProbeQuality } = await import('./standalone-api');
+      await mapConcurrent(items, 3, async (item) => { onResult(await standaloneProbeQuality(item, signal)); }, signal);
+      return;
+    }
     let res: Response;
     try {
       res = await fetch('/api/quality?stream=1', {
@@ -211,10 +223,10 @@ export const api = {
   },
 
   /** 换源：按标题跨源搜索并取详情，附带接口耗时（测速）；支持 signal 以便关闭弹窗时中止在途请求 */
-  detailSpeed: async (id: string, source: SourceConfig, signal?: AbortSignal) => {
+  detailSpeed: async (id: string, source: SourceConfig, signal?: AbortSignal, opts?: { forceRefresh?: boolean }) => {
     const start = performance.now();
     try {
-      const detail = await api.detail(id, source, signal);
+      const detail = await api.detail(id, source, signal, opts);
       return { ok: true, ms: Math.round(performance.now() - start), detail };
     } catch (err) {
       return { ok: false, ms: Math.round(performance.now() - start), detail: undefined as VideoDetail | undefined, error: err instanceof Error ? err.message : '失败' };
@@ -231,6 +243,7 @@ export const api = {
 
   /** 拉取远程数据源订阅（自动识别 LibreTV-SourceList JSON 与 TVBOX 配置 JSON） */
   fetchSourceList: (url: string) => {
+    if (getNativeHttpBridge()) return import('./standalone-api').then((m) => m.standaloneSourceList(url));
     const sp = new URLSearchParams({ url });
     return request<SourceListPayload>(`/api/source-list?${sp.toString()}`);
   },
@@ -326,12 +339,13 @@ async function searchStream(
   sources: SourceConfig[],
   filterAdult: boolean,
   onSource: (outcome: SourceSearchOutcome) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  forceRefresh?: boolean
 ): Promise<SearchResponse> {
   const res = await fetch('/api/search?stream=1', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ wd, sources, filterAdult }),
+    body: JSON.stringify({ wd, sources, filterAdult, forceRefresh }),
     signal,
   });
     throwForAuthStatus(res);

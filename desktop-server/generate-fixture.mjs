@@ -1,0 +1,11 @@
+import { parseArgs } from 'node:util';
+import { mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+const { values } = parseArgs({ options: { dir: { type: 'string', default: '.desktop-server/test-media' }, ffmpeg: { type: 'string', default: 'ffmpeg' } } });
+const dir = resolve(values.dir);
+await mkdir(dir, { recursive: true });
+const run = (...args) => execFileSync(values.ffmpeg, ['-hide_banner', '-loglevel', 'error', ...args], { stdio: 'inherit' });
+run('-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '180', '-c:v', 'libx264', '-preset', 'ultrafast', '-b:v', '700k', '-maxrate', '900k', '-bufsize', '1400k', '-pix_fmt', 'yuv420p', '-g', '48', '-c:a', 'aac', '-b:a', '64k', '-f', 'hls', '-hls_time', '2', '-hls_list_size', '0', '-hls_segment_filename', `${dir}/segment%03d.ts`, '-y', `${dir}/film.m3u8`);
+run('-i', `${dir}/film.m3u8`, '-c', 'copy', '-movflags', '+faststart', '-y', `${dir}/film.mp4`);
+console.log(`已生成 180 秒 720P 合成画面和测试音：${dir}`);

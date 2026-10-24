@@ -17,6 +17,10 @@ export interface AppSettings {
   selectedKeys: string[];
   yellowFilter: boolean;
   adFilter: boolean;
+  superResolution: boolean;
+  playbackMode: 'direct' | 'desktop';
+  desktopServerUrl: string;
+  desktopPairingToken: string;
   doubanEnabled: boolean;
   /** 首页推荐数据源：豆瓣热门 / Bangumi 每日放送（免 key）/ 影视热榜（60s API） */
   recommendSource: 'douban' | 'bangumi' | 'hot-list';
@@ -301,6 +305,10 @@ export const useAppStore = create<AppState>()(
       selectedKeys: [],
       yellowFilter: true,
       adFilter: true,
+      superResolution: true,
+      playbackMode: 'direct',
+      desktopServerUrl: '',
+      desktopPairingToken: '',
       doubanEnabled: true,
       recommendSource: 'hot-list',
       recommendSourceTouched: false,
@@ -799,6 +807,10 @@ export const useAppStore = create<AppState>()(
         envSubsSeen: s.envSubsSeen,
         yellowFilter: s.yellowFilter,
         adFilter: s.adFilter,
+        superResolution: s.superResolution,
+        playbackMode: s.playbackMode,
+        desktopServerUrl: s.desktopServerUrl,
+        desktopPairingToken: s.desktopPairingToken,
         doubanEnabled: s.doubanEnabled,
         recommendSource: s.recommendSource,
         recommendSourceTouched: s.recommendSourceTouched,

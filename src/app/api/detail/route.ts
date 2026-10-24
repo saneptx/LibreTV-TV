@@ -45,8 +45,8 @@ export async function GET(req: Request) {
     // 详情页根地址：显式 detail 优先，其次 baseUrl 参数，最后用接口地址的 origin 推导
     // （Apple CMS 的详情页通常与接口同域）。脏 URL 会让 new URL 抛错，由外层 catch 兜底
     const detailRoot = (source.detail || baseUrl || new URL(source.url).origin).replace(/\/+$/, '');
-    const cacheKey = `detail:${source.url}|${detailRoot}|${id}`;
-    const cached = getCache<VideoDetail>(cacheKey);
+    const cacheKey = `detail:${source.key}|${source.name}|${source.url}|${detailRoot}|${id}`;
+    const cached = url.searchParams.get('refresh') === '1' ? undefined : getCache<VideoDetail>(cacheKey);
     if (cached) {
       return NextResponse.json(cached);
     }

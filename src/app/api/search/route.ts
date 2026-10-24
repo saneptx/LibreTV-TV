@@ -11,6 +11,7 @@ interface SearchBody {
   wd: string;
   sources: SourceConfig[];
   filterAdult?: boolean;
+  forceRefresh?: boolean;
 }
 
 /** 搜索结果短缓存：同一关键词 + 同一组源在 TTL 内直接返回（播放页返回搜索页等场景） */
@@ -18,7 +19,7 @@ const SEARCH_CACHE_TTL = 60 * 1000;
 
 /** 缓存键：wd + 成人过滤 + 排序后的源地址集合（直接用完整字符串，避免哈希碰撞串缓存） */
 function searchCacheKey(wd: string, sources: SourceConfig[], filterAdult: boolean): string {
-  const urls = sources.map((s) => s.url.replace(/\/+$/, '')).sort().join('|');
+  const urls = sources.map((s) => JSON.stringify([s.key, s.name, s.url.replace(/\/+$/, ''), s.detail || '', s.isAdult === true])).sort().join('|');
   return `search:${wd}\n${filterAdult ? 1 : 0}\n${urls}`;
 }
 
@@ -210,7 +211,7 @@ export async function POST(req: Request) {
   const filterAdult = body.filterAdult !== false;
 
   const cacheKey = searchCacheKey(wd, sources, filterAdult);
-  const cached = getCache<SearchResponse>(cacheKey);
+  const cached = body.forceRefresh === true ? undefined : getCache<SearchResponse>(cacheKey);
   if (cached) {
     // 流式模式下缓存命中也要走 done 事件，客户端解析逻辑保持单一
     if (new URL(req.url).searchParams.get('stream') === '1') {

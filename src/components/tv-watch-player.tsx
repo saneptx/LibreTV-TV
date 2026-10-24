@@ -2,12 +2,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { PlayerShell, type PlayerShellProps } from './player-shell';
+import { NativePlayerShell } from './native-player-shell';
+import { getNativePlayerBridge, type PlaybackMedia } from '@/lib/native-playback';
 import { SwitchSourceModal } from './switch-source';
 import { Spinner } from './states';
 import { useAppStore } from '@/lib/store';
 import { formatTime } from '@/lib/utils';
 import { formatDownloadSpeed } from '@/lib/download-speed';
 import { clampTvSeek, nextTvFocus, type TvDirection } from '@/lib/tv-player-navigation';
+import type { ProcessingPresentation } from '@/lib/playback-processing';
 import styles from './tv-watch-player.module.css';
 
 interface TvWatchPlayerProps {
@@ -45,7 +48,8 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
   const progressRef = useRef<HTMLDivElement>(null);
   const playRef = useRef<HTMLButtonElement>(null);
   const pendingFocus = useRef<'play' | 'progress' | null>(null);
-  const [video, setVideo] = useState<HTMLVideoElement | null>(null);
+  const [video, setVideo] = useState<PlaybackMedia | null>(null);
+  const [nativePlayback] = useState(() => Boolean(getNativePlayerBridge()));
   const [panel, setPanel] = useState<Panel>(null);
   const [hud, setHud] = useState(true);
   const [activity, setActivity] = useState(0);
@@ -57,13 +61,22 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
   const [showBuffering, setShowBuffering] = useState(false);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [playbackError, setPlaybackError] = useState('');
+  const [processingStatus, setProcessingStatus] = useState('');
+  const [processingPresentation, setProcessingPresentation] = useState<ProcessingPresentation | null>(null);
+  const [desktopRetry, setDesktopRetry] = useState(0);
+  const desktopError = nativePlayback && store.playbackMode === 'desktop' && !!playbackError;
   const [bufferAhead, setBufferAhead] = useState(0);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [buffered, setBuffered] = useState(0);
   const [rate, setRate] = useState(1);
-  const receiveVideo = useCallback((element: HTMLVideoElement | null) => setVideo(element), []);
+  const receiveVideo = useCallback((element: PlaybackMedia | null) => setVideo(element), []);
   const openSources = useCallback(() => { setPanel('source'); setHud(true); }, []);
+  useEffect(() => {
+    if (desktopError) rootRef.current?.querySelector<HTMLButtonElement>('[data-tv-desktop-error] button')?.focus();
+  }, [desktopError]);
+
+  useEffect(() => { video?.setFit?.(fit); }, [video, fit]);
 
   // 原生按键回调不在 React 事件批次内：等控件挂载后再交还焦点。
   useEffect(() => {
@@ -90,13 +103,16 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
   useEffect(() => {
     if (!video) return;
     let hasPlayed = false;
+    let pauseObserved = false;
     setBuffering(true);
-    const sync = () => {
+    const sync = (event?: Event) => {
+      if (event?.type === 'pause') pauseObserved = true;
+      if (event?.type === 'play') pauseObserved = false;
       setPosition(Number.isFinite(video.currentTime) ? video.currentTime : 0);
       setDuration(Number.isFinite(video.duration) ? video.duration : 0);
       setPaused(video.paused);
       setRate(video.playbackRate);
-      setBuffering(!video.error && !video.ended && video.readyState < 3 && (!video.paused || !hasPlayed));
+      setBuffering(!video.error && !video.ended && video.readyState < 3 && (!video.paused || !hasPlayed && !pauseObserved));
       setBuffered(video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0);
       let ahead = 0;
       for (let i = 0; i < video.buffered.length; i++) {
@@ -176,6 +192,13 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
   useEffect(() => {
     const handle = (key: string) => {
       setActivity((value) => value + 1);
+      const failure = rootRef.current?.querySelector<HTMLElement>('[data-tv-desktop-error]');
+      if (failure) {
+        if (DIRECTIONS.includes(key)) moveFocus(failure, key as TvDirection);
+        else if (key === 'Enter') (document.activeElement as HTMLElement)?.click();
+        else if (key === 'Escape' || key === 'BrowserBack') onExit();
+        return;
+      }
       if (key === 'Escape' || key === 'BrowserBack') {
         if (panel) closePanel();
         else if (seekPosition !== null) { setSeekPosition(null); setHud(false); rootRef.current?.focus(); }
@@ -243,9 +266,11 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
   if (reversed) order.reverse();
 
   return (
-    <div ref={rootRef} className={styles.screen} tabIndex={-1} data-tv-watch aria-label={`${player.title}，电视全屏播放`}>
+    <div ref={rootRef} className={styles.screen} tabIndex={-1} data-tv-watch data-tv-engine={nativePlayback ? 'native' : 'web'} aria-label={`${player.title}，电视全屏播放`}>
       <div className={styles.media} data-fit={fit}>
-        {player.url ? <PlayerShell {...player} tvMode onVideoReady={receiveVideo} onDownloadSpeed={setDownloadSpeed} onPlaybackError={setPlaybackError} onRequestSwitchSource={openSources} /> : (
+        {player.url ? nativePlayback
+          ? <NativePlayerShell {...player} retryKey={desktopRetry} onProcessingStatus={setProcessingStatus} onProcessingPresentation={setProcessingPresentation} onMediaReady={receiveVideo} onDownloadSpeed={setDownloadSpeed} onPlaybackError={setPlaybackError} onRequestSwitchSource={openSources} />
+          : <PlayerShell {...player} tvMode onVideoReady={receiveVideo} onDownloadSpeed={setDownloadSpeed} onPlaybackError={setPlaybackError} onRequestSwitchSource={openSources} /> : (
           <div className={styles.loading} role="status">
             {loading && <Spinner size="lg" />}
             <span>{loading ? '正在获取播放地址…' : loadError ? '播放地址获取失败，按下键选择换源' : '暂无可用播放地址，按下键选择换源'}</span>
@@ -253,11 +278,19 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
         )}
       </div>
       <div className={styles.gesture} onClick={toggle} aria-hidden="true" />
+      {desktopError && !panel && <section className={styles.desktopError} role="dialog" aria-label="电脑串流暂不可用" data-tv-desktop-error>
+        <h2>{/HTTP (401|403|404|410|429)/.test(playbackError) ? '当前片源暂不可用' : '电脑串流暂不可用'}</h2><p>{playbackError}</p>
+        <div>
+          <button className={styles.button} onClick={() => setPanel('source')}>换源</button>
+          <button className={styles.button} onClick={() => { setPlaybackError(''); setDesktopRetry((n) => n + 1); rootRef.current?.focus(); }}>重试电脑串流</button>
+          <button className={styles.button} onClick={() => { store.updateSettings({ playbackMode: 'direct' }); setPlaybackError(''); rootRef.current?.focus(); }}>切回独立直连</button>
+        </div>
+      </section>}
       {player.url && showBuffering && !playbackError && !panel && seekPosition === null && (
         <div className={styles.buffering} role="status" data-tv-buffering>
-          <div className={styles.bufferingTitle}><Spinner size="lg" /><span>正在缓冲</span></div>
+          <div className={styles.bufferingTitle}><Spinner size="lg" /><span>{processingStatus || '正在缓冲'}</span></div>
           <strong className={styles.downloadSpeed} data-tv-download-speed>{formatDownloadSpeed(downloadSpeed)}</strong>
-          <p>{downloadSpeed > 0 ? '视频下载速度' : '等待片源响应，暂未收到数据'}</p>
+          <p>{processingStatus ? '电脑正在准备画面，请稍候' : downloadSpeed > 0 ? '视频下载速度' : '等待片源响应，暂未收到数据'}</p>
           <p className={styles.bufferDetail}>已缓冲 {bufferAhead.toFixed(1)} 秒 · 下键可打开控制栏换源</p>
         </div>
       )}
@@ -265,7 +298,8 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
         <header className={styles.top}>
           <div className={styles.brand}>LIBRETV · TV</div>
           <h1>{player.title}</h1>
-          <div className={styles.subtitle}>{sourceName}{episodes.length > 1 ? ` · 第 ${currentIndex + 1} / ${episodes.length} 集` : ' · 电影'} · {paused ? '已暂停' : buffering ? '缓冲中' : '正在播放'}</div>
+          <div className={styles.subtitle}>{nativePlayback && store.playbackMode === 'desktop' ? '电脑串流 · ' : ''}{sourceName}{episodes.length > 1 ? ` · 第 ${currentIndex + 1} / ${episodes.length} 集` : ' · 电影'} · {paused ? '已暂停' : buffering ? '缓冲中' : '正在播放'}</div>
+          {processingPresentation && <div className={styles.processing} data-tv-processing-info><div>{processingPresentation.video}</div><div>{processingPresentation.ads}</div></div>}
         </header>
         <div className={styles.bottom}>
           <div className={styles.timeline}>
@@ -304,6 +338,7 @@ export function TvWatchPlayer({ player, sourceName, sourceKey, vodId, episodes, 
           </div> : <div className={styles.settings}>
             <div className={styles.settingRow}><span className={styles.settingLabel}>播放速度</span>{[0.75, 1, 1.25, 1.5, 2].map((value) => <button key={value} className={styles.button} aria-pressed={rate === value} onClick={() => { if (video) video.playbackRate = value; }}>{value === 1 ? '正常 1×' : `${value}×`}</button>)}</div>
             <div className={styles.settingRow}><span className={styles.settingLabel}>画面比例</span><button className={styles.button} aria-pressed={fit === 'contain'} onClick={() => setFit('contain')}>原始比例 · 完整显示</button><button className={styles.button} aria-pressed={fit === 'cover'} onClick={() => setFit('cover')}>铺满屏幕 · 裁切边缘</button></div>
+            {store.playbackMode === 'desktop' && <div className={styles.settingRow}><span className={styles.settingLabel}>AI 超分</span><button className={styles.button} aria-pressed={store.superResolution} onClick={() => store.updateSettings({ superResolution: !store.superResolution })}>{store.superResolution ? '已开启 · 升高一个档位' : '已关闭 · 原始分辨率'}</button></div>}
             <div className={styles.settingRow}><span className={styles.settingLabel}>自动连播</span><button className={styles.button} aria-pressed={store.autoplayNext} onClick={() => store.updateSettings({ autoplayNext: !store.autoplayNext })}>{store.autoplayNext ? '已开启' : '已关闭'}</button><span className={styles.settingLabel}>广告过滤</span><button className={styles.button} aria-pressed={store.adFilter} onClick={() => store.updateSettings({ adFilter: !store.adFilter })}>{store.adFilter ? '已开启' : '已关闭'}</button></div>
           </div>}
           <p className={styles.sheetFooter}>方向键移动焦点 · 确认选择 · 返回继续观看</p>
