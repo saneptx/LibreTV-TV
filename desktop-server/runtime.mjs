@@ -25,6 +25,10 @@ export function run(executable, args, { signal, env = {}, timeout = 120_000, onS
 }
 export class WorkQueue {
   pending = []; running = false;
+  promote(signal, priority = 0) {
+    const entry = this.pending.find(item => item.signal === signal);
+    if (entry && priority < entry.priority) { entry.priority = priority; this.pending.sort((a,b) => a.priority-b.priority); }
+  }
   async enqueue(task, signal, priority = 0) {
     check(signal);
     if (this.pending.length >= 32) throw problem(429, '电脑处理队列已满');
@@ -62,8 +66,8 @@ export async function toolConfig(options = {}) {
   const modelBytes=await (await import('node:fs/promises')).readFile(modelFile);
   const modelSignature=await hash(fast ? modelBytes : Buffer.concat([modelBytes,await (await import('node:fs/promises')).readFile(modelFile.replace(/\.bin$/,'.param'))]));
   env.XDG_CACHE_HOME=join(root,'gpu-cache'); await mkdir(env.XDG_CACHE_HOME,{recursive:true});
-  const config = { ffmpeg, ffprobe, sr, models, env, model, shader, engine: fast ? 'libplacebo-vulkan' : 'ncnn-vulkan', modelSignature, scale: model === 'realesr-animevideov3' ? 2 : 4, encoder: options.encoder || 'h264_nvenc', tile: options.tile || 512, gpu: String(options.gpu ?? 0), targetHeight: options.targetHeight ?? 'auto', chunkSeconds: options.chunkSeconds || 4 };
-  if (!['h264_nvenc', 'libx264'].includes(config.encoder) || !['auto',720,1080,2160].includes(config.targetHeight) || ![1,2,4].includes(config.chunkSeconds) || ![128,256,512].includes(config.tile)) throw problem(400, '电脑处理参数无效');
+  const config = { ffmpeg, ffprobe, sr, models, env, model, shader, engine: fast ? 'libplacebo-vulkan' : 'ncnn-vulkan', modelSignature, scale: model === 'realesr-animevideov3' ? 2 : 4, encoder: options.encoder || 'h264_nvenc', tile: options.tile || 512, gpu: String(options.gpu ?? 0), targetHeight: options.targetHeight ?? 'auto', chunkSeconds: options.chunkSeconds || 8 };
+  if (!['h264_nvenc', 'libx264'].includes(config.encoder) || !['auto',720,1080,2160].includes(config.targetHeight) || ![1,2,4,8].includes(config.chunkSeconds) || ![128,256,512].includes(config.tile)) throw problem(400, '电脑处理参数无效');
   await run(ffprobe, ['-version'], { env });
   await run(ffmpeg, ['-hide_banner','-loglevel','error','-f','lavfi','-i','color=s=320x180:r=24','-frames:v','1','-c:v',config.encoder,'-f','null','-'], { env, timeout: 15_000 });
   if(fast) await run(ffmpeg,['-hide_banner','-loglevel','error',...vulkanDevice(config),'-f','lavfi','-i','testsrc2=s=320x180:r=24','-frames:v','2','-vf',vulkanFilter(config,{width:320,height:180},{width:640,height:360}),'-f','null','-'],{env,timeout:30_000});
@@ -87,6 +91,19 @@ export function vulkanFilter(tools, source, target, frameRate) {
   upscale(forceTwo ? current.width*2 : target.width, forceTwo ? current.height*2 : target.height);
   if (forceTwo) filters.push(`libplacebo=w=${target.width}:h=${target.height}:format=yuv420p`);
   return filters.concat('hwdownload','format=yuv420p','setsar=1').join(',');
+}
+export function encodingProfile(size, fps) {
+  const tier = Math.max(size.height, size.width * 9 / 16);
+  // Even-pixel aspect rounding (854x480, for example) must not move a source up a bitrate tier.
+  const [average, peak] = tier > 1080*1.01 ? [12,20] : tier > 720*1.01 ? [5,8] : tier > 480*1.01 ? [3,5] : [1.5,3];
+  const factor = Math.min(1.5, Math.max(1, fps/30));
+  return { average:Math.round(average*factor*1_000_000), peak:Math.round(peak*factor*1_000_000), buffer:Math.round(peak*factor*1_000_000) };
+}
+export function videoEncoderOptions(encoder, profile) {
+  const limits = ['-maxrate',String(profile.peak),'-bufsize',String(profile.buffer)];
+  return encoder === 'h264_nvenc'
+    ? ['-preset','p4','-rc','vbr','-cq','20','-b:v',String(profile.average),...limits,'-rc-lookahead','0','-zerolatency','1']
+    : ['-preset','veryfast','-crf','20',...limits];
 }
 export class DiskBudget {
   constructor(root, limit = 8 * 1024 ** 3) { this.root = resolve(root); this.limit = limit; this.pins = new Map(); }

@@ -8,7 +8,8 @@ const seen = [];
 before(async () => {
   fixture = http.createServer((req, res) => {
     seen.push({ path: req.url, auth: req.headers.authorization, range: req.headers.range });
-    if (req.url === '/redirect.m3u8') { res.writeHead(302, { Location: '/folder/master.m3u8' }); res.end(); }
+    if (req.url === '/headers.ts') { req.on('close',()=>seen.push({path:'headers-closed'})); }
+    else if (req.url === '/redirect.m3u8') { res.writeHead(302, { Location: '/folder/master.m3u8' }); res.end(); }
     else if (req.url === '/slow.ts') { res.writeHead(200, {'Content-Length':100000}); res.write('first'); req.on('close',()=>seen.push({path:'slow-closed'})); }
     else if (req.url.endsWith('master.m3u8')) { res.setHeader('Content-Type','application/vnd.apple.mpegurl'); res.end('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo.m3u8\n'); }
     else if (req.url.endsWith('.m3u8')) { res.setHeader('Content-Type','application/vnd.apple.mpegurl'); res.end('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x01\n#EXT-X-MAP:URI="init.mp4",BYTERANGE="4@0"\n#EXTINF:3,\n#EXT-X-BYTERANGE:4@2\nsegment.ts\n#EXT-X-ENDLIST\n'); }
@@ -98,4 +99,22 @@ test('删除会话会终止尚在传输的媒体请求',async () => {
   await assert.rejects(reader.read());
   for(let i=0;i<30&&!seen.some(r=>r.path==='slow-closed');i++) await new Promise(r=>setTimeout(r,10));
   assert.ok(seen.some(r=>r.path==='slow-closed'));
+});
+
+test('取消单个处理分片可终止尚未收到响应头的源站请求',async()=>{
+ const controller=new AbortController();let download;
+ const processor={create:(_session,input,network)=>{
+  download=network.open(input.url,undefined,controller.signal);
+  download.catch(()=>{});
+  return {info:{state:'preparing'},close:()=>controller.abort(),status:()=>({state:'preparing'})};
+ }};
+ const app=createDesktopServer({token,allowTestOrigin:origin,processor});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));
+ const base=`http://127.0.0.1:${app.server.address().port}`,headers={Authorization:'Bearer '+token};
+ try {
+  const session=await(await fetch(base+'/v1/sessions',{method:'POST',headers,body:JSON.stringify({url:origin+'/headers.ts'})})).json();
+  for(let n=0;n<100&&!seen.some(r=>r.path==='/headers.ts');n++)await new Promise(r=>setTimeout(r,10));
+  assert(seen.some(r=>r.path==='/headers.ts'));controller.abort();await assert.rejects(download,{name:'AbortError'});
+  for(let n=0;n<100&&!seen.some(r=>r.path==='headers-closed');n++)await new Promise(r=>setTimeout(r,10));
+  assert(seen.some(r=>r.path==='headers-closed'));await fetch(base+'/v1/sessions/'+session.id,{method:'DELETE',headers});
+ }finally {app.closeSessions();await new Promise(r=>{app.server.close(r);app.server.closeAllConnections();});}
 });

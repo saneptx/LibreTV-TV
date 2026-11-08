@@ -15,8 +15,8 @@ android {
         applicationId = "org.libretv.tv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.4.5"
+        versionCode = 14
+        versionName = "0.4.7"
         buildConfigField("String", "LIBRETV_URL", "\"${libreTvUrl.get()}\"")
     }
 

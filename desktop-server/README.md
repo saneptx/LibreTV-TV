@@ -108,7 +108,7 @@ npm run desktop:check:4k
 
 ## 模型、缓存与限制
 
-默认 `fsrcnnx` 为 FSRCNNX_x2_8-0-4-1 模型，通过 libplacebo/Vulkan 执行，默认升高一个档位、最高升至 4K，保持比例。低分辨率源使用神经网络放大；源达到目标尺寸则只转码，不宣称超分。超分不能恢复原片已丢失的真实细节。当前默认按约 4 秒切片，音频编码为 AAC，输出为 H.264 SDR。
+默认 `fsrcnnx` 为 FSRCNNX_x2_8-0-4-1 模型，通过 libplacebo/Vulkan 执行，默认升高一个档位、最高升至 4K，保持比例。低分辨率源使用神经网络放大；源达到目标尺寸则只转码，不宣称超分。超分不能恢复原片已丢失的真实细节。当前默认按约 8 秒切片，音频编码为 AAC，输出为 H.264 SDR。
 
 ```bash
 # 可选高质量模型（明显更慢，可能持续缓冲）
@@ -138,3 +138,25 @@ npm run desktop:check # 真实 GPU：10 秒测试片去除 2 秒广告，编码�
 ### App 超分开关（0.4.3）
 
 片源管理和电脑串流播放设置中的“AI 超分”独立控制每个处理会话。`POST /v1/sessions` 可传 `superResolution: false`，保持原始尺寸并跳过 AI 网络，`adFilter` 仍单独生效；省略或 true 沿用默认升一档/命令行指定档位。输出缓存按开关隔离。更新电脑端代码后需重启现有服务。
+
+### 缓冲与码率（0.4.6）
+
+默认先准备约 8 秒视频，再向前预取约 32 秒（4 段）。下载准备与 GPU 编码使用独立队列，让下一段取流与当前编码重叠；默认 8 秒分段减少工具重启次数，可用 `--chunk-seconds 4` 对照原短分段。较长分段可能增加未缓存位置的冷快进等待。快进需要的分片即使已在后台队列中，也会提升为前台优先级；过时的后台预取会取消。FSRCNNX 与普通转码在同一 FFmpeg 进程处理音画，减少每段的工具启动及 PCM 中间文件。默认分辨率策略仍为升一档，不会因处理慢而自动降低分辨率。
+
+24/30 FPS 的目标/峰值视频码率：720P 为 3/5 Mbps，1080P 为 5/8 Mbps，4K（含电影宽屏）为 12/20 Mbps；高帧率最多放大 1.5 倍，音频另为 AAC 128 Kbps。使用 VBV 约束，短分片平均码率可能暂时超过峰值参数，不能将其视为网络带宽的严格上限。更复杂的画面可能有更多压缩损失。
+
+```bash
+# 默认8秒；网络波动时可提高，代价是首次/换集等待更久（允许0–30秒）
+npm run desktop:server -- --host 0.0.0.0 --startup-buffer-seconds 12
+```
+
+App 0.4.6 电脑增强模式起播/快进恢复需约 4 秒缓存，耗尽缓存后再次播放需约 8 秒；解码侧缓存使用时间与内存约束。这些设置依据 [Media3 缓冲参数](https://developer.android.com/reference/androidx/media3/exoplayer/DefaultLoadControl.Builder#setBufferDurationsMs(int,int,int,int))，不保证处理长期慢于播放时仍能持续观看。`/v1/status` 返回分段长度、下载并行策略、启动预缓冲、预取数量及码率策略；播放任务状态增加 `sourcePreparationSeconds`、`encodeSeconds`、`validationSeconds`。`processingSeconds` 为重叠阶段占用的墙钟时间并集，`speed` 按这个时间计算，不能把各阶段累加后当作串行耗时；需要重启电脑服务使新代码生效。新编码参数使用独立缓存版本，旧文件仍可按 LRU 回收。
+
+
+同片源 GPU 流水线对照（含人为注入的每源分片 1 秒下载等待，不等同于外网实测）：
+
+```bash
+node desktop-server/check-pipeline.mjs
+```
+
+对比相同 1080P / 29.97 FPS 输入、FSRCNNX、4K 输出和编码参数的串行 4 秒、并行 4 秒、并行 8 秒三种配置，检查真实视频/音轨与下载编码重叠，报告保存至 `.desktop-server/pipeline-gpu-validation.json`。此对照使用内部 `overlapDownloads: false` 创建串行控制组，不会切换或重启现有 8090 服务。运行时应避免其他超分任务争用 GPU。

@@ -10,7 +10,7 @@ const mock = vi.hoisted(() => {
       subscriptions: [], adFilter: true, autoplayNext: true, qualityMap: {}, setEnvSources: vi.fn(), recordSourceHealth: vi.fn(), setQuality: vi.fn(),
       playbackMode: 'direct' as 'direct' | 'desktop', desktopServerUrl: '', desktopPairingToken: '', updateSettings: vi.fn(),
     },
-    detail: vi.fn(), search: vi.fn(), clearSearch: vi.fn(), probe: vi.fn(), saved: vi.fn(), saveProgress: vi.fn(), updateHistory: vi.fn(), upsertHistory: vi.fn(),
+    detail: vi.fn(), search: vi.fn(), clearSearch: vi.fn(), probe: vi.fn(), saved: vi.fn(), historyGet: vi.fn(), saveProgress: vi.fn(), updateHistory: vi.fn(), upsertHistory: vi.fn(),
   };
 });
 vi.mock('./store', () => ({
@@ -19,7 +19,7 @@ vi.mock('./store', () => ({
 }));
 vi.mock('./standalone-api', () => ({ standaloneStatus: () => ({ defaultSources: mock.sources }), standaloneDetail: mock.detail, standaloneSearch: mock.search, standaloneProbeQuality: mock.probe, mapConcurrent: async (items: unknown[], _limit: number, run: (item: unknown) => Promise<void>) => { for (const item of items) await run(item); } }));
 vi.mock('./db', () => ({
-  db: { history: { orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) }, searchHistory: { orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) }, progress: { get: mock.saved } },
+  db: { history: { get: mock.historyGet, orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) }, searchHistory: { orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) }, progress: { get: mock.saved } },
   addSearchHistory: vi.fn(), clearSearchHistory: mock.clearSearch, saveProgress: mock.saveProgress, updateHistoryProgress: mock.updateHistory, upsertHistory: mock.upsertHistory,
 }));
 vi.mock('./persist-storage', () => ({ flushPendingPersist: vi.fn() }));
@@ -32,6 +32,7 @@ let messages: Message[];
 let release: (() => void) | undefined;
 beforeEach(() => {
   vi.clearAllMocks(); sourceCache.clear(); messages = [];
+  mock.historyGet.mockReset();
   mock.state.qualityMap = {};
   mock.state.setQuality.mockImplementation((patch: object) => Object.assign(mock.state.qualityMap, patch));
   mock.state.selectedKeys = ['env_0', 'env_1']; mock.state.customAPIs = [];
@@ -84,6 +85,37 @@ describe('原生电视业务协议', () => {
     mock.saved.mockResolvedValue({ position: 998, duration: 1000 });
     browser.LibreTvBackend!.request({ id: 'open-2', op: 'open-playback', args: { item, index: 0 } });
     await vi.waitFor(() => expect(messages.find((m) => m.id === 'open-2')?.value).toMatchObject({ index: 0, position: 0 }));
+  });
+  it('历史影片续播优先使用该集进度，进度表缺失时回退到同集观看记录', async () => {
+    await boot();
+    mock.detail.mockResolvedValue({ episodes: ['https://cdn.test/1.m3u8', 'https://cdn.test/2.m3u8'], videoInfo: {} });
+    mock.saved.mockResolvedValue(undefined);
+    mock.historyGet.mockResolvedValue({ episodeIndex: 1, playbackPosition: 333, duration: 1000 });
+    browser.LibreTvBackend!.request({ id: 'history-resume', op: 'open-playback', args: { item, index: 1 } });
+    await vi.waitFor(() => expect(messages.find(m => m.id === 'history-resume')?.value).toMatchObject({ index: 1, position: 333 }));
+    expect(mock.historyGet).toHaveBeenCalledWith('env_0_42');
+    mock.historyGet.mockClear(); mock.saved.mockResolvedValue({ position: 350, duration: 1000 });
+    browser.LibreTvBackend!.request({ id: 'latest-progress', op: 'open-playback', args: { item, index: 1 } });
+    await vi.waitFor(() => expect(messages.find(m => m.id === 'latest-progress')?.value).toMatchObject({ position: 350 }));
+    expect(mock.historyGet).not.toHaveBeenCalled();
+  });
+  it('历史记录的集数不同或已经看完时从头播放，不串用其他集的进度', async () => {
+    await boot();
+    mock.detail.mockResolvedValue({ episodes: ['https://cdn.test/1.m3u8', 'https://cdn.test/2.m3u8'], videoInfo: {} });
+    mock.saved.mockResolvedValue(undefined);
+    mock.historyGet.mockResolvedValue({ episodeIndex: 1, playbackPosition: 333, duration: 1000 });
+    browser.LibreTvBackend!.request({ id: 'other-episode', op: 'open-playback', args: { item, index: 0 } });
+    await vi.waitFor(() => expect(messages.find(m => m.id === 'other-episode')?.value).toMatchObject({ index: 0, position: 0 }));
+    mock.historyGet.mockResolvedValue({ episodeIndex: 1, playbackPosition: 998, duration: 1000 });
+    browser.LibreTvBackend!.request({ id: 'finished-history', op: 'open-playback', args: { item, index: 1 } });
+    await vi.waitFor(() => expect(messages.find(m => m.id === 'finished-history')?.value).toMatchObject({ index: 1, position: 0 }));
+  });
+  it('旧观看记录没有总时长时仍能恢复已知进度', async () => {
+    await boot();
+    mock.detail.mockResolvedValue({ episodes: ['https://cdn.test/1.m3u8'], videoInfo: {} });
+    mock.saved.mockResolvedValue(undefined); mock.historyGet.mockResolvedValue({ episodeIndex: 0, playbackPosition: 90, duration: 0 });
+    browser.LibreTvBackend!.request({ id: 'legacy-history', op: 'open-playback', args: { item, index: 0 } });
+    await vi.waitFor(() => expect(messages.find(m => m.id === 'legacy-history')?.value).toMatchObject({ position: 90 }));
   });
   it('片源搜索尚未完成时已刷新搜索历史，慢来源不会阻塞首页历史', async () => {
     await boot();

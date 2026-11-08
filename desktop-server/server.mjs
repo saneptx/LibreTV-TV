@@ -60,16 +60,19 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
     if (!addresses.length || url.origin !== testOrigin && addresses.some((entry) => privateAddress(entry.address) && !(allowFakeIp && !isIP(hostname) && fakeIp(entry.address)))) throw failure(403, '不允许访问内网或保留地址片源');
     return { url, address: addresses[0] };
   }
-  async function upstream(raw, headers, method, session, hop = 0) {
+  async function upstream(raw, headers, method, session, hop = 0, signal) {
     if (hop > 5) throw failure(502, '片源重定向过多');
     const { url, address } = await destination(raw);
     if (session.closed) throw failure(410, '播放任务已关闭');
     const response = await new Promise((resolve, reject) => {
       const req = (url.protocol === 'https:' ? https : http).request(url, {
-        method, headers: { 'User-Agent': 'Mozilla/5.0 LibreTV-Desktop/0.1', ...headers, 'Accept-Encoding': 'identity' },
+        method, signal, headers: { 'User-Agent': 'Mozilla/5.0 LibreTV-Desktop/0.1', ...headers, 'Accept-Encoding': 'identity' },
         // Pin the validated address; a second DNS lookup must not bypass the private-address check.
         lookup: (_hostname, options, callback) => options.all ? callback(null, [address]) : callback(null, address.address, address.family),
-      }, resolve);
+      }, response => {
+        // Consumers may await cache bookkeeping before attaching their stream reader.
+        response.on('error', () => {}); resolve(response);
+      });
       session.requests.add(req);
       req.once('close', () => session.requests.delete(req));
       req.once('error', reject);
@@ -79,7 +82,7 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
     if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
       const location = response.headers.location; response.destroy();
       if (!location) throw failure(502, '片源缺少重定向地址');
-      return upstream(new URL(location, url).href, headers, method, session, hop + 1);
+      return upstream(new URL(location, url).href, headers, method, session, hop + 1, signal);
     }
     return { response, url: url.href };
   }
@@ -111,7 +114,7 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
       if (!authorized(req)) throw failure(401, '电脑服务配对码不匹配');
       const path = new URL(req.url, 'http://desktop.local').pathname;
       if (path === '/v1/status' && req.method === 'GET') {
-        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
+        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
       }
       if (path === '/v1/sessions' && req.method === 'POST') {
         let body = '';
@@ -127,7 +130,7 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
         const session = { id: uid(), assets: new Map(), byUrl: new Map(), requests: new Set(), headers, touched: Date.now(), closed: false };
         let mediaPath;
         if (processor) {
-          session.pipeline = processor.create(session, input, { open: (url, range) => upstream(url, { ...headers, ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) }, 'GET', session) });
+          session.pipeline = processor.create(session, input, { open: (url, range, signal) => upstream(url, { ...headers, ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) }, 'GET', session, 0, signal) });
           mediaPath = `/v1/sessions/${session.id}/processed/index.m3u8`;
         } else mediaPath = addAsset(session, input.url);
         sessions.set(session.id, session); stats.created++;

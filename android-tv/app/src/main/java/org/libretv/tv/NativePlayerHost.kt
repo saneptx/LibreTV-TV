@@ -28,7 +28,9 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistParserFactory
 import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist
@@ -60,6 +62,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     private var fit = "contain"
     private var resumeAfterPause = false
     private var videoSize = VideoSize.UNKNOWN
+    private var videoDecoder = ""
     private var meter = ByteMeter()
     private val tick = object : Runnable {
         override fun run() { if (player != null) { emit(); handler.postDelayed(this, 500) } }
@@ -98,18 +101,31 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             if (fallback.isNotEmpty()) require(sameOrigin(http(fallback)) && http(fallback).path?.startsWith("/api/proxy") == true)
             stop()
             id = session; request = next; adFilter = next.optBoolean("adFilter", true)
-            meter = ByteMeter(); proxy = false; rendered = false; errorText = ""
+            meter = ByteMeter(); proxy = false; rendered = false; errorText = ""; videoDecoder = ""
             val renderers = DefaultRenderersFactory(activity).setEnableDecoderFallback(true)
-            val exo = ExoPlayer.Builder(activity, renderers).build()
+            val builder = ExoPlayer.Builder(activity, renderers)
+            if (next.optString("processing") == "enhance") {
+                builder.setLoadControl(DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(15000,45000,4000,8000)
+                    .setTargetBufferBytes(64*1024*1024)
+                    .setPrioritizeTimeOverSizeThresholds(true).build())
+            }
+            val exo = builder.build()
             player = exo
+            exo.addAnalyticsListener(object : AnalyticsListener {
+                override fun onVideoDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String, initializedTimestampMs: Long, initializationDurationMs: Long) {
+                    if (player === exo) videoDecoder = decoderName
+                }
+            })
             exo.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
             exo.setHandleAudioBecomingNoisy(true)
             exo.setVideoTextureView(texture)
             exo.addListener(object : Player.Listener {
-                override fun onEvents(player: Player, events: Player.Events) { emit() }
-                override fun onRenderedFirstFrame() { rendered = true; emit() }
-                override fun onVideoSizeChanged(size: VideoSize) { videoSize = size; resize(); emit() }
+                override fun onEvents(player: Player, events: Player.Events) { if (player === this@NativePlayerHost.player) emit() }
+                override fun onRenderedFirstFrame() { if (player === exo) { rendered = true; emit() } }
+                override fun onVideoSizeChanged(size: VideoSize) { if (player === exo) { videoSize = size; resize(); emit() } }
                 override fun onTracksChanged(tracks: Tracks) {
+                    if (player !== exo) return
                     val video = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
                     if (video.isNotEmpty() && video.none { it.isSupported }) {
                         errorText = "设备暂不支持此视频编码，请尝试换源"
@@ -117,6 +133,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
                     }
                 }
                 override fun onPlayerError(error: PlaybackException) {
+                    if (player !== exo) return
                     Log.w(TAG, "Playback failed: ${error.errorCodeName}", error)
                     val fallbackUrl = request.optString("proxyUrl")
                     if (!proxy && fallbackUrl.isNotEmpty() && error.errorCode in 2000..2999) {
@@ -201,6 +218,8 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
 
     private fun emit() {
         val exo = player ?: return
+        val counters = exo.videoDecoderCounters
+        counters?.ensureUpdated()
         texture.keepScreenOn = exo.playWhenReady
         val body = JSONObject().put("sessionId", id).put("position", exo.currentPosition.coerceAtLeast(0) / 1000.0)
             .put("duration", exo.duration.coerceAtLeast(0) / 1000.0)
@@ -212,6 +231,9 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             .put("bytesPerSecond", meter.speed()).put("error", errorText).put("rendered", rendered)
             .put("route", if (request.optString("delivery") == "desktop") "desktop" else if (exo.currentMediaItem?.localConfiguration?.uri?.let { sameOrigin(it) && it.path?.startsWith("/api/proxy") == true } == true) "proxy" else "direct")
             .put("width", videoSize.width).put("fit", fit)
+            .put("videoDecoder",videoDecoder).put("droppedFrames",counters?.droppedBufferCount ?: 0)
+            .put("renderedFrames",counters?.renderedOutputBufferCount ?: 0)
+            .put("videoBitrate",exo.videoFormat?.bitrate ?: -1)
         if (onState != null) {
             onState.invoke(body)
             if (BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=$body;", null)
@@ -220,10 +242,14 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     fun pauseForLifecycle() { resumeAfterPause = player?.playWhenReady == true; player?.pause(); texture.keepScreenOn = false }
     fun resumeForLifecycle() { if (resumeAfterPause) player?.play(); resumeAfterPause = false }
     fun stop() {
-        if(onState!=null && BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=null;",null)
         handler.removeCallbacks(tick)
-        player?.release(); player = null; id = ""; resumeAfterPause = false
-        texture.visibility = View.INVISIBLE; texture.keepScreenOn = false; videoSize = VideoSize.UNKNOWN; fit = "contain"
+        // release() may synchronously invoke listeners, including timeout errors.
+        // Retire the instance first so its callbacks cannot revive a stopped session.
+        val previous = player
+        player = null; id = ""; resumeAfterPause = false
+        previous?.release()
+        texture.visibility = View.INVISIBLE; texture.keepScreenOn = false; videoSize = VideoSize.UNKNOWN; fit = "contain"; videoDecoder = ""
+        if(onState!=null && BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=null;",null)
     }
     fun release() {
         stop()

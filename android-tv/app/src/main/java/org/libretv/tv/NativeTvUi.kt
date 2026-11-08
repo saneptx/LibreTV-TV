@@ -41,12 +41,15 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     private val sourceCount = ui.text("正在加载…", 15, ui.muted)
     private val search = ui.input("搜索电影、剧集或动漫")
     private val searchButton = ui.button("搜索") { startSearch(search.text.toString()) }
+    private val watchHistoryButton = ui.button("历史观看") { showWatchHistory() }
+    private var historyFocusKey: String? = null
     private val historySection = ui.column()
     private val historyRow = ui.grid(5)
     private val statusPrefix = ui.text("电视模式", 17, bold = true)
     private val status = ui.text("输入片名，按遥控器确认键搜索", 14, ui.muted)
     private val grid = ui.grid(5).apply { id = View.generateViewId() }
     private val empty = ui.column().apply { gravity = Gravity.CENTER; minimumHeight = ui.px(243) }
+    private val emptyHint = ui.text("搜索并播放影片后，这里会显示观看记录",16,Color.rgb(112,135,163))
     private val more = ui.button("显示更多") { adapter.showMore() }
     private val adapter = MovieAdapter()
     private var config = JSONObject()
@@ -115,6 +118,11 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         header.addView(brand, FrameLayout.LayoutParams(-2,ui.px(96),Gravity.TOP or Gravity.LEFT))
         val source = ui.row()
         source.addView(sourceCount)
+        watchHistoryButton.apply {
+            ui.homeFocus(this,radius=11); setTextColor(ui.ink); ui.fontWeight(this,800)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(17).toFloat())
+        }
+        source.addView(watchHistoryButton,ui.margins(116,53).apply { leftMargin=ui.px(19) })
         val manager = ui.button("片源管理") { showSourceSettings() }.apply { ui.homeFocus(this, radius=11); setTextColor(ui.ink); setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(17).toFloat()); ui.fontWeight(this,800) }
         source.addView(manager, ui.margins(116,53).apply { leftMargin=ui.px(19) })
         header.addView(source, FrameLayout.LayoutParams(-2,ui.px(53),Gravity.TOP or Gravity.RIGHT))
@@ -130,7 +138,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         form.addView(searchButton,ui.margins(130,58)); searchButton.isEnabled=false; home.addView(form)
         val historyHeader=ui.row()
         historyHeader.addView(ui.text("最近搜索",12,ui.muted),LinearLayout.LayoutParams(0,ui.px(26),1f))
-        historyHeader.addView(ui.button("清空历史") { backend.request("clear-search-history") { refreshHome() } }.apply {
+        historyHeader.addView(ui.button("清空搜索") { backend.request("clear-search-history") { refreshHome() } }.apply {
             ui.homeFocus(this,Color.TRANSPARENT,8); setTextColor(ui.muted); setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(11).toFloat()); minHeight=0; minimumHeight=0; setPadding(0,0,0,0); background=android.graphics.drawable.StateListDrawable().apply {
                 addState(intArrayOf(android.R.attr.state_focused),ui.background(Color.TRANSPARENT,ui.cyan,8))
                 addState(intArrayOf(),ui.background(Color.TRANSPARENT,Color.TRANSPARENT,8))
@@ -147,7 +155,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         home.addView(more,ui.margins(288,50).apply { gravity=Gravity.CENTER_HORIZONTAL; topMargin=ui.px(22) })
         val circle=ui.text("＋",32,ui.cyan).apply { gravity=Gravity.CENTER; background=ui.background(Color.TRANSPARENT,Color.rgb(49,71,96),44) }
         empty.addView(circle,ui.margins(88,88).apply { gravity=Gravity.CENTER_HORIZONTAL })
-        empty.addView(ui.text("用方向键移动焦点，按确认键选择",16,Color.rgb(112,135,163)),ui.margins(-2,-2).apply { gravity=Gravity.CENTER_HORIZONTAL; topMargin=ui.px(16) })
+        empty.addView(emptyHint,ui.margins(-2,-2).apply { gravity=Gravity.CENTER_HORIZONTAL; topMargin=ui.px(16) })
         home.addView(empty,ui.margins(-1,243))
     }
     private fun buildPlayback() {
@@ -222,8 +230,24 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         }
         historySection.visibility=if (names.isEmpty()) View.GONE else View.VISIBLE
         if (searched.isEmpty()) {
-            adapter.submitCards(emptyList()); statusPrefix.text="电视模式"; status.text="输入片名，按遥控器确认键搜索"
+            adapter.submitHistory(data.optJSONArray("history").objects())
+            statusPrefix.text="历史观看"
+            status.text=if(adapter.count>0) "最近观看 ${adapter.count} 部 · 按确认键继续播放" else "暂无观看记录，输入片名开始搜索"
+            emptyHint.text="搜索并播放影片后，这里会显示观看记录"
         }
+    }
+    private fun showWatchHistory() {
+        if(!ready) return
+        backend.cancel(searchId); searchId=null; searched=""
+        search.setText(""); searchButton.text="搜索"; searchButton.isEnabled=true
+        applyHome(homeData); homeScroll.smoothScrollTo(0,0); refreshHome()
+    }
+    private fun resumeHistory(entry: JSONObject) {
+        val item=JSONObject().put("sourceKey",entry.optString("sourceKey"))
+            .put("sourceUrl",entry.optString("sourceUrl")).put("sourceName",sourceName(entry.optString("sourceKey")))
+            .put("vodId",entry.optString("vodId")).put("name",entry.optString("title")).put("pic",entry.optString("pic"))
+        historyFocusKey=entry.optString("id")
+        openPlayback(item,entry.optInt("episodeIndex").coerceAtLeast(0))
     }
     private fun applyConfig(value: JSONObject) { config = value; sourceCount.text = "${value.optInt("enabled")} 个来源已启用"; modeBadge.text=if(value.optString("playbackMode")=="desktop") "电脑串流 · ANDROID TV" else "独立运行 · ANDROID TV" }
     private fun sourceName(key: String) = config.optJSONArray("sources").objects().find { it.optString("key") == key }?.optString("name") ?: "观看记录"
@@ -235,6 +259,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if (query.isEmpty()) { toast("请输入片名"); search.requestFocus(); return }
         (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(search.windowToken, 0)
         backend.cancel(searchId)
+        emptyHint.text="没有找到相关影片，试试其他关键词或片源"
         searched = query; statusPrefix.text=query; status.text="正在搜索 ${config.optInt("enabled")} 个来源…"; adapter.submitCards(emptyList()); searchButton.text="搜索中…"; searchButton.isEnabled=false
         searchId = backend.request("search", JSONObject().put("query", query)) { event ->
             when (event.optString("event")) {
@@ -701,7 +726,8 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     private fun exitPlayback() {
         savePlayback(); closeDesktopPlayback(); backend.cancel(openingId); loadingPlayback = false; active = null; session = ""; seekPreview = null
         player.stop(); playback.visibility=View.GONE; view.background=TvHomeBackground(); homeScroll.visibility=View.VISIBLE
-        grid.getChildAt(0)?.requestFocus(); refreshHome()
+        if(searched.isEmpty()) adapter.focusHistory(historyFocusKey) else grid.getChildAt(0)?.requestFocus()
+        refreshHome()
     }
     private fun playbackKey(code: Int): TvPlaybackNavigation.Key? = when(code) {
         KeyEvent.KEYCODE_BACK,KeyEvent.KEYCODE_ESCAPE -> TvPlaybackNavigation.Key.BACK
@@ -763,8 +789,13 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         var visible=72
         val count get()=cards.size
         private val rows=linkedMapOf<String,LinearLayout>()
-        private fun key(card:JSONObject)="${card.optString("name")}|${card.optString("year")}"
+        private fun key(card:JSONObject)=card.optJSONObject("history")?.let { "history:${it.optString("id")}" }
+            ?: "${card.optString("name")}|${card.optString("year")}"
         fun showMore() { visible+=72; render() }
+        fun submitHistory(value:List<JSONObject>) {
+            submitCards(value.map { entry -> JSONObject().put("name",entry.optString("title")).put("pic",entry.optString("pic")).put("history",entry) })
+        }
+        fun focusHistory(id:String?) { (rows["history:$id"] ?: rows.values.firstOrNull())?.requestFocus() }
         fun submitCards(value:List<JSONObject>) { if (cards.isEmpty()) visible=72; cards=value; render() }
         private fun render() {
             val shown=cards.take(visible)
@@ -775,7 +806,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
                 val previous=rows.toMap(); grid.removeAllViews(); rows.clear()
                 shown.forEachIndexed { index,card ->
                     val k=key(card); val root=previous[k] ?: createCard()
-                    rows[k]=root; grid.addView(root,ui.gridCell(index,5,308).apply { setMargins(ui.px(6),0,ui.px(6),ui.px(21)) })
+                    rows[k]=root; grid.addView(root,ui.gridCell(index,5,if(card.has("history")) 184 else 308).apply { setMargins(ui.px(6),0,ui.px(6),ui.px(21)) })
                 }
             }
             shown.forEach { card -> bind(rows.getValue(key(card)),card) }
@@ -790,23 +821,48 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             val poster=FrameLayout(activity).apply { background=ui.background(Color.rgb(17,31,48),radius=14); clipToOutline=true }
             poster.addView(ImageView(activity).apply { scaleType=ImageView.ScaleType.CENTER_CROP; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO },FrameLayout.LayoutParams(-1,-1))
             poster.addView(ui.text("",10,ui.navy,true).apply { setPadding(ui.px(8),ui.px(4),ui.px(8),ui.px(4)); background=ui.background(Color.rgb(91,227,255),radius=20) },FrameLayout.LayoutParams(-2,-2,Gravity.TOP or Gravity.LEFT).apply { setMargins(ui.px(10),ui.px(10),0,0) })
+            poster.addView(android.widget.ProgressBar(activity,null,android.R.attr.progressBarStyleHorizontal).apply {
+                max=1000; progressTintList=android.content.res.ColorStateList.valueOf(ui.cyan)
+                progressBackgroundTintList=android.content.res.ColorStateList.valueOf(Color.rgb(37,58,78)); visibility=View.GONE
+                importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },FrameLayout.LayoutParams(-1,ui.px(4),Gravity.BOTTOM))
             addView(poster,ui.margins(-1,246))
             addView(ui.text("",16,bold=true).apply { ui.fontWeight(this,750); maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END },ui.margins(-1,24).apply { topMargin=ui.px(14) })
-            addView(ui.text("",12,ui.muted).apply { maxLines=1 },ui.margins(-1,18).apply { topMargin=ui.px(4) })
+            addView(ui.text("",12,ui.muted).apply { maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END },ui.margins(-1,18).apply { topMargin=ui.px(4) })
+            addView(ui.text("",12,ui.muted).apply { isSingleLine=true; ellipsize=android.text.TextUtils.TruncateAt.END; visibility=View.GONE },ui.margins(-1,18))
         }
         private fun bind(root:LinearLayout,card:JSONObject) {
             val poster=root.getChildAt(0) as FrameLayout
             val image=poster.getChildAt(0) as ImageView
             if (image.tag!=card.optString("pic")) posters.load(image,card.optString("pic"))
+            val entry=card.optJSONObject("history")
+            poster.layoutParams=ui.margins(-1,if(entry!=null) 104 else 246)
             val count=card.optJSONArray("items")?.length() ?: 0
-            (poster.getChildAt(1) as TextView).apply { text="$count 源"; visibility=if(count>1) View.VISIBLE else View.GONE }
+            val position=entry?.optDouble("playbackPosition",0.0) ?: 0.0
+            val length=entry?.optDouble("duration",0.0) ?: 0.0
+            val finished=length>0 && position>=length-15
+            (poster.getChildAt(1) as TextView).apply {
+                text=if(entry!=null) (if(finished) "已看完" else "继续观看") else "$count 源"
+                visibility=if(entry!=null || count>1) View.VISIBLE else View.GONE
+            }
+            (poster.getChildAt(2) as android.widget.ProgressBar).apply {
+                visibility=if(entry!=null && length>0) View.VISIBLE else View.GONE
+                progress=if(length>0 && position.isFinite()) ((position/length).coerceIn(0.0,1.0)*1000).toInt() else 0
+            }
             (root.getChildAt(1) as TextView).text=card.optString("name")
-            (root.getChildAt(2) as TextView).text=listOf(card.optString("year"),card.optString("remarks")).filter { it.isNotEmpty() }.joinToString(" · ")
-            root.contentDescription=card.optString("name")
-            root.setOnClickListener { openDetail(card) }
+            var progressLabel=""
+            val meta=if(entry!=null) {
+                val episode=if(entry.optInt("totalEpisodes")>1) "第 ${entry.optInt("episodeIndex")+1} / ${entry.optInt("totalEpisodes")} 集" else "电影"
+                progressLabel=if(finished) "已看完 · 确认重播" else "已看 ${TvPlaybackRules.time(position)}${if(length>0) " / ${TvPlaybackRules.time(length)}" else ""}"
+                "$episode · ${sourceName(entry.optString("sourceKey"))}"
+            } else listOf(card.optString("year"),card.optString("remarks")).filter { it.isNotEmpty() }.joinToString(" · ")
+            (root.getChildAt(2) as TextView).apply { text=meta; isSingleLine=true }
+            (root.getChildAt(3) as TextView).apply { text=progressLabel; visibility=if(entry!=null) View.VISIBLE else View.GONE }
+            root.contentDescription=if(entry!=null) "历史观看：${card.optString("name")}" else card.optString("name")
+            root.setOnClickListener { if(entry!=null) resumeHistory(entry) else openDetail(card) }
             root.setOnKeyListener { _,code,event ->
                 if(code==KeyEvent.KEYCODE_DPAD_CENTER || code==KeyEvent.KEYCODE_ENTER) {
-                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) card.optJSONArray("items")?.optJSONObject(0)?.let { openPlayback(it,0) }
+                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { if(entry!=null) resumeHistory(entry) else card.optJSONArray("items")?.optJSONObject(0)?.let { openPlayback(it,0) } }
                     true
                 } else false
             }

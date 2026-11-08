@@ -98,7 +98,10 @@ export function installNativeTvBackend(): () => void {
           const detail = await standaloneDetail(item.vodId, source, signal);
           const index = Math.min(Math.max(0, Number(args.index) || 0), detail.episodes.length - 1);
           const saved = await db.progress.get(`${source.key}_${item.vodId}_${index}`);
-          const position = typeof args.position === 'number' ? Math.max(0, args.position) : saved && saved.position < saved.duration - 15 ? saved.position : 0;
+          const history = saved ? undefined : await db.history.get(`${source.key}_${item.vodId}`);
+          const resume = saved || (history?.episodeIndex === index ? { position: history.playbackPosition, duration: history.duration } : undefined);
+          const position = typeof args.position === 'number' ? Math.max(0, args.position)
+            : resume && (resume.duration <= 0 || resume.position < resume.duration - 15) ? Math.max(0, resume.position) : 0;
           if (signal.aborted) break;
           const playback = await resolvePlaybackDelivery(detail.episodes[index], useAppStore.getState(), signal, { position, adFilter: useAppStore.getState().adFilter, onProgress: (value) => progress('processing-progress', value) });
           const playbackPosition = playback.position ?? position;
@@ -106,7 +109,7 @@ export function installNativeTvBackend(): () => void {
           try {
             await upsertHistory({ sourceKey: source.key, sourceUrl: source.url, vodId: item.vodId, title: item.name,
               pic: item.pic || detail.videoInfo.cover, episodeIndex: index, totalEpisodes: detail.episodes.length,
-              playbackPosition: position, duration: saved?.duration || 0, timestamp: Date.now() });
+              playbackPosition: position, duration: resume?.duration || 0, timestamp: Date.now() });
             value = { item, source, detail, index, position: playbackPosition, playback, config: config() };
           } catch (error) { void closeDesktopSession(playback.desktopSession); throw error; }
           if (signal.aborted) void closeDesktopSession(playback.desktopSession);
