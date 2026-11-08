@@ -70,7 +70,7 @@ npm test
 ## 协议和限制
 
 - `GET /v1/status`：协议版本、实际处理能力、任务数与流量计数。
-- `POST /v1/sessions`：原播放 URL、原片进度、广告开关 → 异步 `enhance` 任务和不透明媒体路径。
+- `POST /v1/sessions`：原播放 URL、原片进度、广告开关，以及可选的 `adSegments`（设备按编码比对/学习/常规启发式识别出的分片行，最多 400 条，按播放列表原文匹配）→ 异步 `enhance` 任务和不透明媒体路径。
 - `GET /v1/sessions/:id`：处理阶段、错误、输入/输出尺寸、处理倍速、缓存命中与删除广告时间轴。
 - `GET/HEAD /v1/sessions/:id/processed/index.m3u8` / `:n.ts`：完整去广告 VOD 时间轴与按需编码分段，支持 Range。
 - `GET/HEAD /v1/sessions/:id/media/:asset`：HLS 递归重写，分片/密钥/初始化资源和 MP4 转发；保留 Range 与 206。

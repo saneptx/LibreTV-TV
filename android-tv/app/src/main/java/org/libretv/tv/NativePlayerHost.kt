@@ -41,6 +41,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.ParsingLoadable
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.util.ArrayDeque
@@ -63,6 +64,13 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     private var resumeAfterPause = false
     private var videoSize = VideoSize.UNKNOWN
     private var videoDecoder = ""
+    // 数据页识别出的额外广告分片行；timeMap 为原片时间轴上实际删除的区间，进度换算以它为准。
+    private var adSegments = emptySet<String>()
+    // 分析时读到的媒体列表原文；盗链站按请求插入广告，必须播放同一份列表删除行才对得上。
+    private var playlists = emptyMap<String, String>()
+    private var timeMap = emptyList<PlaylistFilter.Removal>()
+    private var pendingOriginal: Double? = null
+    private var generation = 0
     private var meter = ByteMeter()
     private val tick = object : Runnable {
         override fun run() { if (player != null) { emit(); handler.postDelayed(this, 500) } }
@@ -102,6 +110,10 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             stop()
             id = session; request = next; adFilter = next.optBoolean("adFilter", true)
             meter = ByteMeter(); proxy = false; rendered = false; errorText = ""; videoDecoder = ""
+            adSegments = next.optJSONArray("adSegments")?.let { list -> (0 until minOf(list.length(), 400)).map { list.optString(it).trim() }.filter { it.isNotEmpty() && !it.startsWith('#') }.toSet() } ?: emptySet()
+            playlists = next.optJSONArray("playlists")?.let { list -> (0 until minOf(list.length(), 3)).mapNotNull { list.optJSONObject(it) }
+                .filter { it.optString("text").startsWith("#EXTM3U") && it.optString("url").startsWith("http") }.associate { it.getString("url") to it.getString("text") } } ?: emptyMap()
+            timeMap = emptyList(); pendingOriginal = next.optDouble("position", 0.0).takeIf { it.isFinite() && it > 0 }
             val renderers = DefaultRenderersFactory(activity).setEnableDecoderFallback(true)
             val builder = ExoPlayer.Builder(activity, renderers)
             if (next.optString("processing") == "enhance") {
@@ -168,8 +180,10 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             "filter" -> {
                 val enabled = body.optBoolean("enabled", true)
                 if (adFilter != enabled) {
-                    adFilter = enabled
-                    prepare(if (proxy) request.getString("proxyUrl") else request.getString("url"), exo.currentPosition, exo.playWhenReady)
+                    // 换算回原片时间再重建；新列表解析后按新的删除区间定位。
+                    val original = AdTimeMap.original(exo.currentPosition / 1000.0, timeMap)
+                    adFilter = enabled; pendingOriginal = original
+                    prepare(if (proxy) request.getString("proxyUrl") else request.getString("url"), (original * 1000).toLong(), exo.playWhenReady)
                 }
             }
         }
@@ -197,10 +211,20 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
         val isHls = Uri.parse(path).path?.endsWith(".m3u8", true) == true || !Uri.parse(path).path.orEmpty().matches(Regex(".*\\.(mp4|mkv|webm|mov)$", RegexOption.IGNORE_CASE))
         val mediaSource = if (isHls) {
             item.setMimeType(MimeTypes.APPLICATION_M3U8)
-            HlsMediaSource.Factory(resolving).setPlaylistParserFactory(FilterParserFactory(adFilter)).createMediaSource(item.build())
+            val token = ++generation
+            val parsers = FilterParserFactory(adFilter, adSegments, playlists) { removals -> handler.post { if (token == generation && player === exo) applyTimeMap(removals) } }
+            HlsMediaSource.Factory(resolving).setPlaylistParserFactory(parsers).createMediaSource(item.build())
         } else DefaultMediaSourceFactory(resolving).createMediaSource(item.build())
         exo.setMediaSource(mediaSource, position.coerceAtLeast(0))
         exo.prepare(); exo.playWhenReady = autoplay
+    }
+
+    private fun applyTimeMap(removals: List<PlaylistFilter.Removal>) {
+        timeMap = removals
+        val original = pendingOriginal ?: return
+        pendingOriginal = null
+        val cleaned = AdTimeMap.clean(original, timeMap)
+        if (kotlin.math.abs(cleaned - original) > .25) player?.seekTo((cleaned * 1000).toLong())
     }
 
     private fun resize() {
@@ -233,7 +257,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             .put("width", videoSize.width).put("fit", fit)
             .put("videoDecoder",videoDecoder).put("droppedFrames",counters?.droppedBufferCount ?: 0)
             .put("renderedFrames",counters?.renderedOutputBufferCount ?: 0)
-            .put("videoBitrate",exo.videoFormat?.bitrate ?: -1)
+            .put("videoBitrate",exo.videoFormat?.bitrate ?: -1).put("timeMap", JSONArray().apply { timeMap.forEach { put(JSONObject().put("start", it.start).put("duration", it.duration)) } })
         if (onState != null) {
             onState.invoke(body)
             if (BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=$body;", null)
@@ -246,7 +270,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
         // release() may synchronously invoke listeners, including timeout errors.
         // Retire the instance first so its callbacks cannot revive a stopped session.
         val previous = player
-        player = null; id = ""; resumeAfterPause = false
+        player = null; id = ""; resumeAfterPause = false; generation++; timeMap = emptyList(); pendingOriginal = null
         previous?.release()
         texture.visibility = View.INVISIBLE; texture.keepScreenOn = false; videoSize = VideoSize.UNKNOWN; fit = "contain"; videoDecoder = ""
         if(onState!=null && BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=null;",null)
@@ -256,12 +280,18 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
         if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) WebViewCompat.removeWebMessageListener(web, "LibreTvNativePlayer")
     }
 
-    private class FilterParserFactory(private val enabled: Boolean) : HlsPlaylistParserFactory {
+    private class FilterParserFactory(private val enabled: Boolean, private val flagged: Set<String>, private val analyzed: Map<String, String>, private val onMedia: (List<PlaylistFilter.Removal>) -> Unit) : HlsPlaylistParserFactory {
         private val base = DefaultHlsPlaylistParserFactory()
         private fun wrap(parser: ParsingLoadable.Parser<HlsPlaylist>) = ParsingLoadable.Parser<HlsPlaylist> { uri, input ->
-            if (!enabled) parser.parse(uri, input) else {
-                val text = input.bufferedReader().readText()
-                parser.parse(uri, ByteArrayInputStream(PlaylistFilter.strip(text).toByteArray(Charsets.UTF_8)))
+            val downloaded = input.bufferedReader().readText()
+            val text = if (enabled) analyzed[uri.toString()] ?: downloaded else downloaded
+            // 主列表不含分片，不能用它的空结果覆盖媒体列表的删除区间。
+            val media = text.contains("#EXTINF")
+            if (!enabled) { if (media) onMedia(emptyList()); parser.parse(uri, ByteArrayInputStream(text.toByteArray(Charsets.UTF_8))) }
+            else {
+                val result = PlaylistFilter.filter(text, flagged)
+                if (media) onMedia(result.removals)
+                parser.parse(uri, ByteArrayInputStream(result.text.toByteArray(Charsets.UTF_8)))
             }
         }
         override fun createPlaylistParser() = wrap(base.createPlaylistParser())

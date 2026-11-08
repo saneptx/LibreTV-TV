@@ -317,6 +317,43 @@ export function parseTsVideoResolution(buf: Uint8Array): MediaResolution | undef
   return parseH264Sps(sps);
 }
 
+/** PMT 中全部基本流的 stream_type，按出现顺序；用来比较广告与正片的音视频轨布局 */
+function parsePmtStreamTypes(payload: Uint8Array): number[] {
+  const begin = 1 + payload[0];
+  if (begin + 12 > payload.length || payload[begin] !== 0x02) return [];
+  const sectionLength = ((payload[begin + 1] & 0x0f) << 8) | payload[begin + 2];
+  const end = begin + 3 + sectionLength - 4;
+  const programInfoLength = ((payload[begin + 10] & 0x0f) << 8) | payload[begin + 11];
+  const types: number[] = [];
+  let p = begin + 12 + programInfoLength;
+  while (p + 5 <= end && p + 5 <= payload.length) {
+    types.push(payload[p]);
+    p += 5 + (((payload[p + 3] & 0x0f) << 8) | payload[p + 4]);
+  }
+  return types;
+}
+
+/**
+ * TS 分片的编码特征：轨道类型布局 + 视频尺寸。
+ * 盗链站插入的广告与正片是分别编码的，这两项几乎总是不同；只有两项都解析成功才返回，
+ * 解析不全时宁可返回 undefined，也不能拿半个特征去判定广告。
+ */
+export function parseTsSignature(buf: Uint8Array): string | undefined {
+  const start = findTsOffset(buf);
+  if (start < 0) return undefined;
+  let pmtPid = -1;
+  let types: number[] = [];
+  for (const packet of readTsPackets(buf, start)) {
+    if (!packet.payloadStart) continue;
+    if (pmtPid < 0 && packet.pid === 0x0000) { pmtPid = parsePat(packet.payload); continue; }
+    if (pmtPid >= 0 && packet.pid === pmtPid) { types = parsePmtStreamTypes(packet.payload); break; }
+  }
+  if (types.length === 0) return undefined;
+  const size = parseTsVideoResolution(buf);
+  if (!size) return undefined;
+  return `ts|${types.map((t) => t.toString(16)).join(',')}|${size.width}x${size.height}`;
+}
+
 // ——— MP4 / fMP4 ———
 
 /** 承载分辨率的 visual sample entry */

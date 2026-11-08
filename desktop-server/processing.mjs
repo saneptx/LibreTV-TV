@@ -108,7 +108,8 @@ class ProcessingSession {
         const choice = variants.find((v) => !v.height || v.height <= maximum) || variants.at(-1);
         externalAudio = choice.audio || externalAudio; result = await this.network.open(choice.url, undefined, this.signal); continue;
       }
-      this.mediaSource = { ...parseMedia(body, result.url, { adFilter: this.input.adFilter !== false }), signature: await hash(body) };
+      // 独立音轨的分片行不同，设备的额外标记无法对齐音轨，此时只用电脑自身规则。
+      this.mediaSource = { ...parseMedia(body, result.url, { adFilter: this.input.adFilter !== false, adSegments: externalAudio ? undefined : this.input.adSegments }), signature: await hash(body) };
       if (externalAudio) {
         this.audioSource = await this.media(externalAudio, this.input.adFilter !== false);
         if (Math.abs(this.mediaSource.duration - this.audioSource.duration) > .1) throw problem(422, '视频与独立音轨广告时间轴不一致，请换源');
@@ -146,7 +147,7 @@ class ProcessingSession {
       adRemovalSupported: !!this.mediaSource, removedSegments: this.info.removedSegments, removedSeconds: this.info.removedSeconds };
     const outputLabel = this.size.width >= 3840 ? (this.size.height >= 2160 ? '4K' : '4K 宽屏') : `${this.size.height}P`;
     this.label = `电脑${this.size.superResolution ? ' AI 超分' : '转码'} · ${outputLabel}${this.info.removedSegments ? ` · 过滤 ${this.info.removedSegments} 个广告分片` : ''}`;
-    const signature = await hash(JSON.stringify({ version: 6, url: this.input.url, headers: this.session.headers, source: this.mediaSource?.signature || (await stat(this.file)).size, audio: this.audioSource?.signature, model: this.tools.modelSignature, size: this.size, fps: this.frameRate, encoder: this.tools.encoder, bitrate: this.encodingProfile, chunk: this.chunkDuration, superResolution: this.input.superResolution !== false, adFilter: this.input.adFilter !== false }));
+    const signature = await hash(JSON.stringify({ version: 6, url: this.input.url, headers: this.session.headers, source: this.mediaSource?.signature || (await stat(this.file)).size, audio: this.audioSource?.signature, model: this.tools.modelSignature, size: this.size, fps: this.frameRate, encoder: this.tools.encoder, bitrate: this.encodingProfile, chunk: this.chunkDuration, superResolution: this.input.superResolution !== false, adFilter: this.input.adFilter !== false, adSegments: this.input.adSegments?.length ? await hash(JSON.stringify(this.input.adSegments)) : undefined }));
     this.directory = join(this.root, 'processed', signature); await mkdir(this.directory, { recursive: true, mode: 0o700 });
     if (firstWork) await rm(firstWork, { recursive: true, force: true });
     const first = Math.floor(this.position / this.chunkDuration);

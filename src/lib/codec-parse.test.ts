@@ -9,6 +9,7 @@ import {
   parseTsVideoResolution,
   unescapeRbsp,
 } from './codec-parse';
+import { parseTsSignature } from './codec-parse-core';
 
 /** 位写入器：手写 SPS 的二进制极易出错，用语法元素逐项构造 */
 class BitWriter {
@@ -280,6 +281,22 @@ describe('parseTsVideoResolution', () => {
   it('不是 TS 流时返回 undefined', () => {
     expect(parseTsVideoResolution(new Uint8Array(600).fill(0x5a))).toBeUndefined();
     expect(parseTsVideoResolution(new Uint8Array(0))).toBeUndefined();
+  });
+});
+
+describe('parseTsSignature', () => {
+  it('包含轨道类型与视频尺寸，不同编码的分片特征不同', () => {
+    const hd = buildTsWithSps(buildSps({ widthInMbs: 120, heightInMapUnits: 68, cropBottom: 4 }));
+    const sd = buildTsWithSps(buildSps({ widthInMbs: 80, heightInMapUnits: 45 }));
+    expect(parseTsSignature(hd)).toBe('ts|1b|1920x1080');
+    expect(parseTsSignature(sd)).toBe('ts|1b|1280x720');
+  });
+
+  it('解析不全时返回 undefined，不拿半个特征做判定', () => {
+    expect(parseTsSignature(new Uint8Array(600).fill(0x5a))).toBeUndefined();
+    const es = concat([new Uint8Array([0x00, 0x00, 0x00, 0x01]), new Uint8Array([0x26, 0x01, 0x02])]);
+    const hevc = concat([buildTsPacket(0x0000, buildPat(0x1000), true), buildTsPacket(0x1000, buildPmt(0x0100, 0x24), true), ...packetize(0x0100, buildPes(es))]);
+    expect(parseTsSignature(hevc)).toBeUndefined();
   });
 });
 

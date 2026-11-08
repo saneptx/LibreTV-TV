@@ -21,7 +21,9 @@ function byteRange(value, previous, url) {
   if (!Number.isSafeInteger(length) || length < 1 || !Number.isSafeInteger(offset) || offset < 0) throw problem(422, '片源 BYTERANGE 缺少有效偏移');
   return { url, start: offset, end: offset + length - 1 };
 }
-export function parseMedia(text, base, { adFilter = true } = {}) {
+export function parseMedia(text, base, { adFilter = true, adSegments } = {}) {
+  // 设备按编码特征/已学习指纹识别出的分片行，按播放列表原文匹配
+  const flagged = adFilter && adSegments?.length ? new Set(adSegments) : undefined;
   if (!text.trimStart().startsWith('#EXTM3U')) throw problem(422, '视频清单格式无效');
   if (!text.includes('#EXT-X-ENDLIST')) throw problem(422, '电脑增强目前只支持点播，暂不处理直播清单');
   if (/#EXT-X-(DEFINE|CONTENT-STEERING):|\{\$/.test(text)) throw problem(422, '暂不支持带变量或内容转向的 HLS');
@@ -54,7 +56,7 @@ export function parseMedia(text, base, { adFilter = true } = {}) {
       previousRange = bytes;
       const adPath = /\/(?:ads?|advert(?:isement)?|adjump)(?:\/|[_.-])/i.test(new URL(url).pathname);
       const segment = { url, duration, originalStart: original, start: retained, sequence, range: bytes, key: key ? { ...key, iv: key.iv || '0x' + BigInt(sequence).toString(16).padStart(32, '0') } : undefined, map, discontinuity };
-      if (adFilter && (cue || adPath)) removed.push({ sequence, start: original, duration, reason: cue ? 'cue' : 'url' });
+      if (adFilter && (cue || adPath || flagged?.has(line))) removed.push({ sequence, start: original, duration, reason: cue ? 'cue' : adPath ? 'url' : 'device' });
       else { segments.push(segment); retained += duration; }
       original += duration; sequence++; duration = undefined; range = undefined; discontinuity = false;
       if (segments.length + removed.length > 12000 || original > 8 * 3600) throw problem(422, '片源超过当前八小时处理上限');

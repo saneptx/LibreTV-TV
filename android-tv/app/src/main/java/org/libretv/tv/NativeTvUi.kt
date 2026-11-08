@@ -367,7 +367,9 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             val delivery = descriptor.optJSONObject("playback") ?: JSONObject().put("url",descriptor.getJSONObject("detail").getJSONArray("episodes").getString(descriptor.optInt("index")))
             val url = delivery.getString("url")
             player.command(JSONObject().put("version", 1).put("sessionId", session).put("type", "load")
-                .put("request", JSONObject().put("url", url).put("headers", delivery.optJSONObject("headers") ?: JSONObject()).put("delivery", delivery.optString("delivery", "direct")).put("processing",delivery.optString("processing")).put("label",delivery.optString("label")).put("position", descriptor.optDouble("position")).put("adFilter", delivery.optString("processing")!="enhance" && config.optBoolean("adFilter", true))))
+                .put("request", JSONObject().put("url", url).put("headers", delivery.optJSONObject("headers") ?: JSONObject()).put("delivery", delivery.optString("delivery", "direct")).put("processing",delivery.optString("processing")).put("label",delivery.optString("label")).put("position", descriptor.optDouble("position")).put("adFilter", delivery.optString("processing")!="enhance" && config.optBoolean("adFilter", true))
+                .put("adSegments", if (delivery.optString("processing")=="enhance") JSONArray() else delivery.optJSONArray("adSegments") ?: JSONArray())
+                .put("playlists", if (delivery.optString("delivery")=="desktop") JSONArray() else delivery.optJSONArray("playlists") ?: JSONArray())))
             command("rate", JSONObject().put("rate", rate)); command("fit", JSONObject().put("fit", fit))
             showControls(true)
         }
@@ -417,7 +419,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         playerProcessingVideo.setLabel(if(!value.optBoolean("rendered")) "正在读取实际画面分辨率…" else presentation?.optString("video")
             ?: if(enhanced) "电脑增强 · 处理详情未知，请更新电脑服务" else "${if(delivery?.optString("delivery")=="desktop") "电脑原画转发" else "原始直连"} · 未超分 · 当前 $dimensions")
         playerProcessingAds.setLabel(presentation?.optString("ads") ?: if(enhanced) "去广告：处理结果未知，请更新电脑服务"
-            else if(config.optBoolean("adFilter",true)) "去广告：设备分片过滤已开启（不含内嵌广告）" else "去广告：已关闭")
+            else adsLabel())
         playButton.setLabel(if (value.optBoolean("paused")) "▶ 继续播放" else "Ⅱ 暂停")
         prevButton.isEnabled = a.optInt("index") > 0; nextButton.isEnabled = a.optInt("index") < count - 1
         prevButton.alpha = if (prevButton.isEnabled) 1f else .35f; nextButton.alpha = if (nextButton.isEnabled) 1f else .35f
@@ -447,13 +449,23 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             showControls(true)
             if (a.optJSONObject("playback")?.optString("delivery") == "desktop" && desktopFailureSession != session) {
                 desktopFailureSession = session
-                showDesktopFailure("电脑串流中断：$error", item, a.optInt("index"), originalPosition(value.optDouble("position"),a.optJSONObject("playback")?.optJSONArray("timeMap")))
+                showDesktopFailure("电脑串流中断：$error", item, a.optInt("index"), originalPosition(value.optDouble("position"),timeMap()))
             }
         }
         if (value.optBoolean("ended") && endedSession != session) {
             endedSession = session
             if (config.optBoolean("autoplayNext", true) && a.optInt("index") < count - 1) episode(1) else showControls(true)
         }
+    }
+    /** 电脑增强用服务端时间轴；直连用 Media3 过滤器实际删除的区间 */
+    private fun timeMap():JSONArray? = active?.optJSONObject("playback")?.optJSONArray("timeMap") ?: state.optJSONArray("timeMap")
+    private fun adsLabel(): String {
+        if(!config.optBoolean("adFilter",true)) return "去广告：已关闭"
+        val removed=timeMap().objects()
+        val summary=active?.optJSONObject("playback")?.optJSONObject("adSummary")
+        val extra=listOfNotNull(summary?.optInt("codecGroups")?.takeIf { it>0 }?.let { "编码比对 $it 段" }, summary?.optInt("learnedGroups")?.takeIf { it>0 }?.let { "已学习 $it 段" }, summary?.optInt("repeatGroups")?.takeIf { it>0 }?.let { "重复插入 $it 段" })
+        if(removed.isEmpty()) return "去广告：未发现可识别的广告分片（不含画面内广告）"
+        return "去广告：已过滤 ${removed.size} 处 · ${removed.sumOf { it.optDouble("duration") }.toInt()} 秒${if(extra.isEmpty()) "" else "（含${extra.joinToString("、")}）"}"
     }
     private fun originalPosition(position:Double, removals:JSONArray?):Double {
         var result=position; var removed=0.0
@@ -465,7 +477,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if (state.optDouble("duration") <= 0) return
         val item = a.getJSONObject("item")
         backend.request("save-progress", JSONObject().put("sourceKey", item.optString("sourceKey")).put("vodId", item.optString("vodId"))
-            .put("index", a.optInt("index")).put("position", state.optDouble("position")).put("duration", state.optDouble("duration")).put("timeMap",a.optJSONObject("playback")?.optJSONArray("timeMap") ?: JSONArray()))
+            .put("index", a.optInt("index")).put("position", state.optDouble("position")).put("duration", state.optDouble("duration")).put("timeMap",timeMap() ?: JSONArray()))
         lastSaved = SystemClock.elapsedRealtime()
     }
     private fun episode(delta: Int) {
@@ -579,7 +591,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
                 backend.request("settings",JSONObject().put(key,enabled)) { event ->
                     event.optJSONObject("value")?.let { applyConfig(it); button.text=if(enabled) "已开启" else "已关闭"; button.isSelected=enabled; if(key=="adFilter" || key=="superResolution") {
                         val a=active
-                        if(a?.optJSONObject("playback")?.optString("processing")=="enhance") openPlayback(a.getJSONObject("item"),a.optInt("index"),originalPosition(state.optDouble("position"),a.optJSONObject("playback")?.optJSONArray("timeMap")))
+                        if(a?.optJSONObject("playback")?.optString("processing")=="enhance") openPlayback(a.getJSONObject("item"),a.optInt("index"),originalPosition(state.optDouble("position"),timeMap()))
                         else if(key=="adFilter") command("filter",JSONObject().put("enabled",enabled))
                     } }
                 }
@@ -587,10 +599,34 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             return button
         }
         add(flags,flag("autoplayNext")); flags.addView(ui.text("广告过滤",13,Color.rgb(186,196,209)),ui.margins(77,-2)); add(flags,flag("adFilter"))
+        if(config.optBoolean("adFilter",true)) {
+            val learning=row("广告学习")
+            add(learning,ui.button("标记当前片段为广告") { markAd(p) })
+            val clear=ui.button("清除已学习（${config.optInt("learnedAds")}）") {}
+            clear.setOnClickListener {
+                backend.request("clear-learned-ads") { event -> event.optJSONObject("value")?.let { applyConfig(it); clear.text="清除已学习（0）"; toast("已清除学习的广告") } }
+            }
+            add(learning,clear)
+        }
         if(config.optString("playbackMode")=="desktop") {
             val superRow=row("AI 超分"); add(superRow,flag("superResolution")); superRow.addView(ui.text("开启升高一档 · 关闭保持原始分辨率",11,ui.muted),ui.margins(-2,-2))
         }
         p.show(); rateButtons.getOrNull(listOf(.75,1.0,1.25,1.5,2.0).indexOf(rate))?.requestFocus()
+    }
+    /** 广告播放时标记：记下该段指纹，并从段尾重新打开，让本次与以后的播放都去掉它 */
+    private fun markAd(p: TvWidgets.Panel) {
+        val a=active ?: return
+        val index=a.optInt("index")
+        val url=a.getJSONObject("detail").getJSONArray("episodes").optString(index)
+        p.status.text="正在识别当前片段…"
+        backend.request("mark-ad",JSONObject().put("url",url).put("position",originalPosition(state.optDouble("position"),timeMap())).put("title",a.getJSONObject("item").optString("name"))) { event ->
+            if(event.optString("event")=="error") { p.status.text=event.optString("error"); return@request }
+            val value=event.optJSONObject("value") ?: return@request
+            value.optJSONObject("config")?.let { applyConfig(it) }
+            p.dialog.dismiss(); toast("已学习这段广告，正在跳过")
+            // 面板关闭回调会取消进行中的打开请求，须排在它之后再重新打开
+            main.post { openPlayback(a.getJSONObject("item"),index,value.optDouble("end")+.5) }
+        }
     }
     private fun formatRate()=if(rate%1.0==0.0) rate.toInt().toString() else rate.toString()
     private fun showSourceSettings(focusMode: Boolean = false) {

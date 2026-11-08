@@ -21,6 +21,11 @@ export interface PlaybackDelivery {
   position?: number;
   timeMap?: RemovedInterval[];
   sourceHeight?: number;
+  /** 设备侧识别出的额外广告分片行（编码不一致 / 已学习），直连时交给 Media3 过滤器 */
+  adSegments?: string[];
+  adSummary?: { codecGroups: number; learnedGroups: number; repeatGroups: number };
+  /** 直连时播放器使用与分析相同的媒体列表原文 */
+  playlists?: { url: string; text: string }[];
   processingInfo?: ProcessingInfo;
   presentation?: ProcessingPresentation;
 }
@@ -58,11 +63,11 @@ export async function closeDesktopSession(session?: DesktopSession): Promise<voi
   try { await api({ desktopServerUrl: session.server, desktopPairingToken: session.token }, `/v1/sessions/${session.id}`, 'DELETE'); }
   catch { /* 断线后由服务端 TTL 清理；不阻塞换集、退出或独立模式。 */ }
 }
-export async function resolvePlaybackDelivery(url: string, settings: DesktopSettings & { playbackMode?: 'direct' | 'desktop'; superResolution?: boolean }, signal?: AbortSignal, options: { position?: number; adFilter?: boolean; onProgress?: (progress: ProcessingProgress) => void } = {}): Promise<PlaybackDelivery> {
+export async function resolvePlaybackDelivery(url: string, settings: DesktopSettings & { playbackMode?: 'direct' | 'desktop'; superResolution?: boolean }, signal?: AbortSignal, options: { position?: number; adFilter?: boolean; adSegments?: string[]; onProgress?: (progress: ProcessingProgress) => void } = {}): Promise<PlaybackDelivery> {
   if (settings.playbackMode !== 'desktop') return { url, headers: {}, delivery: 'direct' };
   // Do not abort the small create response after it reaches the server: retain its id so a late cancellation can DELETE it.
   if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
-  const result = await api(settings, '/v1/sessions', 'POST', { url, superResolution: settings.superResolution !== false, ...(options.position === undefined ? {} : { position: options.position }), ...(options.adFilter === undefined ? {} : { adFilter: options.adFilter }) });
+  const result = await api(settings, '/v1/sessions', 'POST', { url, superResolution: settings.superResolution !== false, ...(options.position === undefined ? {} : { position: options.position }), ...(options.adFilter === undefined ? {} : { adFilter: options.adFilter }), ...(options.adSegments?.length ? { adSegments: options.adSegments } : {}) });
   if (result.protocol !== 1 || typeof result.id !== 'string' || !/^[a-f0-9]{32}$/.test(result.id) || typeof result.path !== 'string' || !['relay','enhance'].includes(String(result.processing)) || !result.path.startsWith(`/v1/sessions/${result.id}/`)) throw new Error('电脑服务返回了无效播放任务');
   const desktopSession = { id: result.id, server: desktopAddress(settings.desktopServerUrl), token: settings.desktopPairingToken.trim() };
   const target = new URL(result.path, desktopSession.server);

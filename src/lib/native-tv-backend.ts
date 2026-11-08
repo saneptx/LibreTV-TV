@@ -8,6 +8,8 @@ import { qualityKey, qualityLabel, isQualityEntryFresh } from './quality';
 import { flushPendingPersist } from './persist-storage';
 import { syncSourceSubscription } from './subscription-sync';
 import { closeDesktopSession, resolvePlaybackDelivery, testDesktopConnection, sourcePosition, sourceDuration, type RemovedInterval, type DesktopSession } from './desktop-playback';
+import { analyzePlaylist, clearLearnedAds, decideAds, learnAdAt, loadLearnedAds, saveLearnedAd, type AdTransport, type MediaAnalysis } from './ad-analysis';
+import { decodeNativeBytes, encodeNativeBytes, nativeFetch, nativeRpc } from './native-http';
 import type { SearchResultItem, SourceConfig } from './types';
 
 interface BackendRequest { id: string; op: string; args?: Record<string, unknown> }
@@ -16,6 +18,46 @@ interface BackendWindow extends Window {
   LibreTvBackend?: { request(request: BackendRequest): void };
 }
 const castWindow = () => window as BackendWindow;
+
+const adTransport: AdTransport = {
+  fetchText: async (url, signal) => {
+    const res = await nativeFetch(url, { signal, timeoutMs: 5000 });
+    return res.ok ? { text: await res.text(), url: res.url || url } : undefined;
+  },
+  fetchPrefix: async (url, maxBytes, signal) => {
+    const res = await nativeFetch(url, { signal, timeoutMs: 4000, maxBytes, prefix: true });
+    return res.ok ? new Uint8Array(await res.arrayBuffer()) : undefined;
+  },
+  decrypt: async (body, key, iv) => decodeNativeBytes((await nativeRpc('decrypt', { body: encodeNativeBytes(body), key: encodeNativeBytes(key), iv: encodeNativeBytes(iv) })).body),
+};
+/** 当前及最近播放的段组指纹；标记广告和重新打开时不必再联网建指纹 */
+const adAnalyses = new Map<string, { media: MediaAnalysis[]; at: number }>();
+async function analyzeAds(url: string, signal: AbortSignal): Promise<MediaAnalysis[]> {
+  const cached = adAnalyses.get(url);
+  // 列表里的签名地址和插入的广告都会变，缓存只覆盖本次观看（含标记后重开）
+  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.media;
+  const media = await analyzePlaylist(url, adTransport, signal);
+  if (signal.aborted) return media;
+  adAnalyses.delete(url);
+  if (adAnalyses.size >= 20) adAnalyses.delete(adAnalyses.keys().next().value!);
+  adAnalyses.set(url, { media, at: Date.now() });
+  return media;
+}
+/** 交给 Media3 的分析原文；总量受原生消息上限约束，超出时让播放器自行下载 */
+function analyzedPlaylists(media: MediaAnalysis[]): { url: string; text: string }[] {
+  const list = media.map(({ url, text }) => ({ url, text }));
+  return list.reduce((n, p) => n + p.text.length, 0) <= 1536 * 1024 ? list : [];
+}
+/** 电脑会话请求体有上限；超出时只少删，不影响播放 */
+function boundedLines(lines: string[]): string[] {
+  const result: string[] = [];
+  let bytes = 0;
+  for (const line of lines) {
+    if (result.length >= 400 || line.length > 2048 || (bytes += line.length + 4) > 48 * 1024) break;
+    result.push(line);
+  }
+  return result;
+}
 
 export function nativeSources(): SourceConfig[] {
   const store = useAppStore.getState(), seen = new Set<string>();
@@ -34,7 +76,7 @@ function config() {
   return {
     sources: [...store.envSources, ...store.customAPIs].filter((s) => !store.yellowFilter || !s.isAdult),
     selectedKeys: store.selectedKeys, enabled: nativeSources().length, subscriptions: store.subscriptions,
-    adFilter: store.adFilter, superResolution: store.superResolution !== false, autoplayNext: store.autoplayNext,
+    adFilter: store.adFilter, learnedAds: loadLearnedAds().length, superResolution: store.superResolution !== false, autoplayNext: store.autoplayNext,
     playbackMode: store.playbackMode || 'direct', desktopServerUrl: store.desktopServerUrl || '', desktopPairingToken: store.desktopPairingToken || '',
   };
 }
@@ -103,7 +145,13 @@ export function installNativeTvBackend(): () => void {
           const position = typeof args.position === 'number' ? Math.max(0, args.position)
             : resume && (resume.duration <= 0 || resume.position < resume.duration - 15) ? Math.max(0, resume.position) : 0;
           if (signal.aborted) break;
-          const playback = await resolvePlaybackDelivery(detail.episodes[index], useAppStore.getState(), signal, { position, adFilter: useAppStore.getState().adFilter, onProgress: (value) => progress('processing-progress', value) });
+          const adFilter = useAppStore.getState().adFilter;
+          const analyzed = adFilter ? await analyzeAds(detail.episodes[index], signal) : [];
+          const ads = adFilter ? decideAds(analyzed, loadLearnedAds()) : undefined;
+          if (signal.aborted) break;
+          const resolved = await resolvePlaybackDelivery(detail.episodes[index], useAppStore.getState(), signal, { position, adFilter,
+            adSegments: ads ? boundedLines([...ads.extraLines, ...ads.heuristicLines]) : undefined, onProgress: (value) => progress('processing-progress', value) });
+          const playback = ads ? { ...resolved, adSegments: boundedLines(ads.extraLines), playlists: resolved.delivery === 'direct' ? analyzedPlaylists(analyzed) : [], adSummary: { codecGroups: ads.codecGroups, learnedGroups: ads.learnedGroups, repeatGroups: ads.repeatGroups } } : resolved;
           const playbackPosition = playback.position ?? position;
           if (signal.aborted) { void closeDesktopSession(playback.desktopSession); break; }
           try {
@@ -179,6 +227,15 @@ export function installNativeTvBackend(): () => void {
             height: cached?.height, quality: qualityLabel(cached?.height) };
           break;
         }
+        case 'mark-ad': {
+          const url = String(args.url || ''), position = Number(args.position);
+          if (!/^https?:\/\//i.test(url) || !Number.isFinite(position) || position < 0) throw new Error('无效的播放位置');
+          const { group, entry } = await learnAdAt(await analyzeAds(url, signal), position, adTransport, signal);
+          const learned = saveLearnedAd({ ...entry, title: String(args.title || '').slice(0, 80) || undefined });
+          value = { start: group.start, end: group.start + group.duration, learnedAds: learned.length, config: config() };
+          break;
+        }
+        case 'clear-learned-ads': clearLearnedAds(); value = config(); break;
         case 'toggle-source': useAppStore.getState().toggleSourceSelected(String(args.key)); flushPendingPersist(); value = config(); break;
         case 'add-source': {
           const url = new URL(String(args.url).trim());

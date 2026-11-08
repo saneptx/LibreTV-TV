@@ -56,3 +56,10 @@ test('默认只提高一个档位，宽屏按原始画幅归档，4K不再放大
 test('关闭超分保留原始尺寸，裁边宽屏也不缩小',()=>{
  for(const [width,height] of [[1280,720],[1920,1080],[1920,800],[3840,1600]]) assert.deepEqual(targetSize(width,height,'auto',false),{width,height,superResolution:false});
 });
+test('设备标记的广告分片按原文行删除，并计入时间轴',()=>{
+ const body=list(['#EXTINF:4,','film0.ts','#EXT-X-DISCONTINUITY','#EXTINF:3,','https://ad.test/x/0.ts','#EXTINF:3,','https://ad.test/x/1.ts','#EXT-X-DISCONTINUITY','#EXTINF:4,','film1.ts']);
+ const parsed=parseMedia(body,'https://video.test/a/index.m3u8',{adSegments:['https://ad.test/x/0.ts','https://ad.test/x/1.ts']});
+ assert.deepEqual(parsed.segments.map(s=>s.url),['https://video.test/a/film0.ts','https://video.test/a/film1.ts']);
+ assert.deepEqual(parsed.removed.map(r=>[r.start,r.duration,r.reason]),[[4,3,'device'],[7,3,'device']]);
+ assert.equal(parseMedia(body,'https://video.test/a/index.m3u8',{adFilter:false,adSegments:['https://ad.test/x/0.ts']}).removed.length,0);
+});

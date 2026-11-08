@@ -53,6 +53,11 @@ test('阻止私网、URL 凭证及非 HTTP 片源，测试豁免仅限单个 ori
   for (const ip of ['127.0.0.1','192.168.0.1','10.0.0.1','::1','::ffff:7f00:1','fc00::1','fe80::1','2002:7f00:1::']) assert.equal(privateAddress(ip),true,ip);
   assert.equal(privateAddress('8.8.8.8'),false); assert.equal(privateAddress('2606:4700:4700::1111'),false);
 });
+test('设备广告分片参数需为有限的分片行',async () => {
+  for (const adSegments of ['a.ts',[1],['#EXTINF:1,'],['a\nb'],Array(401).fill('a.ts')]) {
+    const res=await request('/v1/sessions',{method:'POST',body:JSON.stringify({url:'https://example.com/a.m3u8',adSegments})}); assert.equal(res.status,400,JSON.stringify(adSegments).slice(0,40));
+  }
+});
 test('拒绝无法安全重写的 HLS，而不是绕开电脑访问',() => {
   assert.throws(()=>rewritePlaylist('#EXTM3U\n#EXT-X-DEFINE:NAME="a",VALUE="b"','https://example.com',()=>''));
   assert.throws(()=>rewritePlaylist('<html>bad</html>','https://example.com',()=>''));
