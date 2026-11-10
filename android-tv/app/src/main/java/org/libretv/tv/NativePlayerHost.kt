@@ -70,6 +70,11 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     private var playlists = emptyMap<String, String>()
     private var timeMap = emptyList<PlaylistFilter.Removal>()
     private var pendingOriginal: Double? = null
+    // 多来源比对得到的夹带广告区间（原片时间），播放到时直接跳过；电脑增强时用服务端时间轴换算。
+    private var skips = emptyList<PlaylistFilter.Removal>()
+    private var serverTimeMap: List<PlaylistFilter.Removal>? = null
+    private var skipped = 0
+    private val skipCheck = Runnable { checkSkip() }
     private var generation = 0
     private var meter = ByteMeter()
     private val tick = object : Runnable {
@@ -113,6 +118,8 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             adSegments = next.optJSONArray("adSegments")?.let { list -> (0 until minOf(list.length(), 400)).map { list.optString(it).trim() }.filter { it.isNotEmpty() && !it.startsWith('#') }.toSet() } ?: emptySet()
             playlists = next.optJSONArray("playlists")?.let { list -> (0 until minOf(list.length(), 3)).mapNotNull { list.optJSONObject(it) }
                 .filter { it.optString("text").startsWith("#EXTM3U") && it.optString("url").startsWith("http") }.associate { it.getString("url") to it.getString("text") } } ?: emptyMap()
+            skips = emptyList(); skipped = 0
+            serverTimeMap = next.optJSONArray("timeMap")?.let { list -> (0 until list.length()).mapNotNull { list.optJSONObject(it) }.map { PlaylistFilter.Removal(it.optDouble("start"), it.optDouble("duration")) } }
             timeMap = emptyList(); pendingOriginal = next.optDouble("position", 0.0).takeIf { it.isFinite() && it > 0 }
             val renderers = DefaultRenderersFactory(activity).setEnableDecoderFallback(true)
             val builder = ExoPlayer.Builder(activity, renderers)
@@ -177,6 +184,13 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
                 if (rate.isFinite()) exo.setPlaybackSpeed(rate.toFloat().coerceIn(.25f, 3f))
             }
             "fit" -> { fit = if (body.optString("fit") == "cover") "cover" else "contain"; resize() }
+            "skip" -> {
+                val list = body.optJSONArray("intervals")
+                skips = (0 until minOf(list?.length() ?: 0, 100)).mapNotNull { list?.optJSONObject(it) }
+                    .map { PlaylistFilter.Removal(it.optDouble("start"), it.optDouble("duration")) }
+                    .filter { it.start.isFinite() && it.duration.isFinite() && it.start >= 0 && it.duration > 0 }.sortedBy { it.start }
+                checkSkip()
+            }
             "filter" -> {
                 val enabled = body.optBoolean("enabled", true)
                 if (adFilter != enabled) {
@@ -227,6 +241,26 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
         if (kotlin.math.abs(cleaned - original) > .25) player?.seekTo((cleaned * 1000).toLong())
     }
 
+    private fun activeMap() = serverTimeMap ?: timeMap
+    /** 进入夹带广告区间即跳到区间末尾；临近区间时按剩余时间精确排程，不依赖 500 ms 的状态节拍 */
+    private fun checkSkip() {
+        handler.removeCallbacks(skipCheck)
+        val exo = player ?: return
+        if (skips.isEmpty()) return
+        val map = activeMap()
+        val position = exo.currentPosition / 1000.0
+        val original = AdTimeMap.original(position, map)
+        val hit = skips.firstOrNull { original >= it.start - .05 && original < it.start + it.duration - .3 }
+        if (hit != null && exo.playWhenReady) {
+            val target = AdTimeMap.clean(hit.start + hit.duration, map)
+            if (target > position + .3) { exo.seekTo((target * 1000).toLong()); skipped++ }
+            return
+        }
+        val next = skips.firstOrNull { it.start > original } ?: return
+        val wait = (AdTimeMap.clean(next.start, map) - position) / exo.playbackParameters.speed
+        if (wait in 0.0..1.0 && exo.isPlaying) handler.postDelayed(skipCheck, (wait * 1000).toLong().coerceAtLeast(10))
+    }
+
     private fun resize() {
         if (texture.width == 0 || texture.height == 0 || videoSize.height == 0 || videoSize.width == 0) return
         val viewRatio = texture.width.toFloat() / texture.height
@@ -242,6 +276,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
 
     private fun emit() {
         val exo = player ?: return
+        checkSkip()
         val counters = exo.videoDecoderCounters
         counters?.ensureUpdated()
         texture.keepScreenOn = exo.playWhenReady
@@ -258,6 +293,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             .put("videoDecoder",videoDecoder).put("droppedFrames",counters?.droppedBufferCount ?: 0)
             .put("renderedFrames",counters?.renderedOutputBufferCount ?: 0)
             .put("videoBitrate",exo.videoFormat?.bitrate ?: -1).put("timeMap", JSONArray().apply { timeMap.forEach { put(JSONObject().put("start", it.start).put("duration", it.duration)) } })
+            .put("skips", skips.size).put("skipped", skipped)
         if (onState != null) {
             onState.invoke(body)
             if (BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=$body;", null)
@@ -266,11 +302,11 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     fun pauseForLifecycle() { resumeAfterPause = player?.playWhenReady == true; player?.pause(); texture.keepScreenOn = false }
     fun resumeForLifecycle() { if (resumeAfterPause) player?.play(); resumeAfterPause = false }
     fun stop() {
-        handler.removeCallbacks(tick)
+        handler.removeCallbacks(tick); handler.removeCallbacks(skipCheck)
         // release() may synchronously invoke listeners, including timeout errors.
         // Retire the instance first so its callbacks cannot revive a stopped session.
         val previous = player
-        player = null; id = ""; resumeAfterPause = false; generation++; timeMap = emptyList(); pendingOriginal = null
+        player = null; id = ""; resumeAfterPause = false; generation++; timeMap = emptyList(); pendingOriginal = null; skips = emptyList(); serverTimeMap = null
         previous?.release()
         texture.visibility = View.INVISIBLE; texture.keepScreenOn = false; videoSize = VideoSize.UNKNOWN; fit = "contain"; videoDecoder = ""
         if(onState!=null && BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=null;",null)

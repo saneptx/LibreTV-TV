@@ -18,6 +18,8 @@ export interface AppSettings {
   yellowFilter: boolean;
   adFilter: boolean;
   superResolution: boolean;
+  /** 电脑串流时识别并去除固定水印、滚动字幕 */
+  overlayRemoval: boolean;
   playbackMode: 'direct' | 'desktop';
   desktopServerUrl: string;
   desktopPairingToken: string;
@@ -306,6 +308,7 @@ export const useAppStore = create<AppState>()(
       yellowFilter: true,
       adFilter: true,
       superResolution: true,
+      overlayRemoval: true,
       playbackMode: 'direct',
       desktopServerUrl: '',
       desktopPairingToken: '',
@@ -808,6 +811,7 @@ export const useAppStore = create<AppState>()(
         yellowFilter: s.yellowFilter,
         adFilter: s.adFilter,
         superResolution: s.superResolution,
+        overlayRemoval: s.overlayRemoval,
         playbackMode: s.playbackMode,
         desktopServerUrl: s.desktopServerUrl,
         desktopPairingToken: s.desktopPairingToken,

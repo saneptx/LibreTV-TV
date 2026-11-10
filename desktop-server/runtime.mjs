@@ -7,20 +7,21 @@ export const hash = async (value) => (await import('node:crypto')).createHash('s
 export const aborted = () => new DOMException('处理已取消', 'AbortError');
 export function check(signal) { if (signal?.aborted) throw aborted(); }
 export async function exists(path) { try { return (await stat(path)).isFile(); } catch { return false; } }
-export function run(executable, args, { signal, env = {}, timeout = 120_000, onStderr } = {}) {
+/** binary=true 时 stdout 以 Buffer 返回（抽帧、解码音频），上限 maxBytes */
+export function run(executable, args, { signal, env = {}, timeout = 120_000, onStderr, binary = false, maxBytes = 64 * 1024 * 1024 } = {}) {
   check(signal);
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { env: { ...process.env, OMP_NUM_THREADS: '2', ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
-    let stdout = '', stderr = '', killTimer;
+    let stdout = '', stderr = '', killTimer, size = 0; const chunks = [];
     const kill = (sig) => { try { if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, sig); else child.kill(sig); } catch {} };
     const stop = () => { kill('SIGTERM'); killTimer = setTimeout(() => kill('SIGKILL'), 2000); killTimer.unref(); };
     const timer = setTimeout(stop, timeout); timer.unref();
     signal?.addEventListener('abort', stop, { once: true });
-    child.stdout.on('data', (b) => { stdout = (stdout + b).slice(-2 * 1024 * 1024); });
+    child.stdout.on('data', (b) => { if (binary) { size += b.length; if (size <= maxBytes) chunks.push(b); else stop(); } else stdout = (stdout + b).slice(-2 * 1024 * 1024); });
     child.stderr.on('data', (b) => { stderr = (stderr + b).slice(-8192); onStderr?.(b.toString()); });
     const cleanup = () => { clearTimeout(timer); clearTimeout(killTimer); signal?.removeEventListener('abort', stop); };
     child.once('error', (error) => { cleanup(); reject(problem(503, `处理工具无法启动：${executable.split('/').pop()} (${error.code || 'error'})`)); });
-    child.once('close', (code, sig) => { cleanup(); if (signal?.aborted) reject(aborted()); else if (code !== 0) reject(Object.assign(problem(502, `电脑视频处理失败：${executable.split('/').pop()} (${sig || code})`), { diagnostic: stderr })); else resolve({ stdout, stderr }); });
+    child.once('close', (code, sig) => { cleanup(); if (signal?.aborted) reject(aborted()); else if (code !== 0) reject(Object.assign(problem(502, `电脑视频处理失败：${executable.split('/').pop()} (${sig || code})`), { diagnostic: stderr })); else if (binary && size > maxBytes) reject(problem(502, '处理工具输出过大')); else resolve({ stdout: binary ? Buffer.concat(chunks) : stdout, stderr }); });
   });
 }
 export class WorkQueue {

@@ -58,6 +58,11 @@ test('设备广告分片参数需为有限的分片行',async () => {
     const res=await request('/v1/sessions',{method:'POST',body:JSON.stringify({url:'https://example.com/a.m3u8',adSegments})}); assert.equal(res.status,400,JSON.stringify(adSegments).slice(0,40));
   }
 });
+test('设备媒体列表原文参数需为有限的 HLS 文本',async () => {
+  for (const playlists of ['x',[{url:'ftp://a/b.m3u8',text:'#EXTM3U'}],[{url:'https://a/b.m3u8',text:'not hls'}],Array(4).fill({url:'https://a/b.m3u8',text:'#EXTM3U'})]) {
+    const res=await request('/v1/sessions',{method:'POST',body:JSON.stringify({url:'https://example.com/a.m3u8',playlists})}); assert.equal(res.status,400,JSON.stringify(playlists).slice(0,40));
+  }
+});
 test('拒绝无法安全重写的 HLS，而不是绕开电脑访问',() => {
   assert.throws(()=>rewritePlaylist('#EXTM3U\n#EXT-X-DEFINE:NAME="a",VALUE="b"','https://example.com',()=>''));
   assert.throws(()=>rewritePlaylist('<html>bad</html>','https://example.com',()=>''));

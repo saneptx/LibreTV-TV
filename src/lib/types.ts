@@ -95,6 +95,8 @@ export interface QualityProbeResult {
   sourceKey: string;
   vodId: string;
   height?: number;
+  /** 实测平均码率（kbps）：分片字节数 ÷ 时长，取全片中段几个分片 */
+  bitrate?: number;
   error?: string;
 }
 

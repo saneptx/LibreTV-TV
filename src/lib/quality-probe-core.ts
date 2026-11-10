@@ -47,6 +47,9 @@ export const QUALITY_PROBE_TIMEOUT_MS = 12000;
  */
 const SEGMENT_BUDGET_MS = 4000;
 
+/** 码率探测（读几个分片大小）的预算，与分片解析并行 */
+const BITRATE_BUDGET_MS = 5000;
+
 /** 从 m3u8 文本解析最高档的短边高度；非 master playlist（无 STREAM-INF）返回 undefined */
 export function parseBestHeight(text: string): number | undefined {
   if (!text.includes('#EXT-X-STREAM-INF')) return undefined;
@@ -304,6 +307,61 @@ export function createQualityProbe({ fetchUpstream, checkUpstreamAllowed, decryp
     return parseTsVideoResolution(buf)?.height;
   }
 
+  /**
+   * 实测码率：只读几个分片的大小（Range bytes=0-0 的 Content-Range，或 BYTERANGE 长度），
+   * 不下载分片本身。取 30%/50%/70% 位置，避开片头片尾和常见的插播位置。
+   */
+  async function measureBitrate(text: string, playlistUrl: string, source: SourceConfig, signal: AbortSignal): Promise<number | undefined> {
+    let media = text, base = playlistUrl;
+    if (text.includes('#EXT-X-STREAM-INF')) {
+      const lines = text.split('\n').map((s) => s.trim());
+      let best: { bandwidth: number; uri: string } | undefined;
+      lines.forEach((line, i) => {
+        if (!line.startsWith('#EXT-X-STREAM-INF')) return;
+        const uri = lines.slice(i + 1).find((s) => s && !s.startsWith('#')), bandwidth = Number(line.match(/BANDWIDTH=(\d+)/)?.[1]) || 0;
+        if (uri && (!best || bandwidth > best.bandwidth)) best = { bandwidth, uri };
+      });
+      const url = best && resolveUrl(playlistUrl, best.uri);
+      if (!url) return undefined;
+      const res = await fetchUpstream(url, { timeoutMs: 4000, headers: probeHeaders(source), signal });
+      if (!res.ok) return undefined;
+      media = await readTextPrefix(res, 4 * 1024 * 1024); base = res.url || url;
+    }
+    const segments: { uri: string; duration: number; length?: number }[] = [];
+    let duration = 0, length: number | undefined;
+    for (const raw of media.split('\n')) {
+      const line = raw.trim();
+      if (line.startsWith('#EXTINF:')) duration = parseFloat(line.slice(8)) || 0;
+      else if (line.startsWith('#EXT-X-BYTERANGE:')) length = Number(line.slice(17).split('@')[0]) || undefined;
+      else if (line && !line.startsWith('#')) { if (duration > 0) segments.push({ uri: line, duration, length }); duration = 0; length = undefined; }
+    }
+    if (segments.length < 3) return undefined;
+    const picks = [.3, .5, .7].map((f) => segments[Math.floor(segments.length * f)]);
+    let bytes = 0, seconds = 0;
+    for (const segment of picks) {
+      let size = segment.length;
+      if (!size) {
+        const url = resolveUrl(base, segment.uri);
+        if (!url) continue;
+        const res = await fetchUpstream(url, { timeoutMs: 4000, headers: { ...probeHeaders(source), Range: 'bytes=0-0' }, signal });
+        size = Number(res.headers.get('content-range')?.split('/')[1]) || (res.status === 200 ? Number(res.headers.get('content-length')) : 0) || undefined;
+        void res.body?.cancel().catch(() => undefined);
+      }
+      if (size && size > 1024) { bytes += size; seconds += segment.duration; }
+    }
+    return seconds > 0 ? Math.round(bytes * 8 / seconds / 1000) : undefined;
+  }
+
+  /** 码率探测的独立预算：失败或超时只是不知道码率，不影响画质结论 */
+  async function withBitrateBudget(text: string, playlistUrl: string, source: SourceConfig, merged: AbortSignal, clientSignal?: AbortSignal): Promise<number | undefined> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new DOMException('码率探测超时', 'TimeoutError')), BITRATE_BUDGET_MS);
+    const combined = joinSignals([merged, controller.signal]);
+    try { return await measureBitrate(text, playlistUrl, source, combined.signal); }
+    catch { if (clientSignal?.aborted) throw new DOMException('已取消', 'AbortError'); return undefined; }
+    finally { clearTimeout(timer); combined.dispose(); }
+  }
+
   /** 取影片的播放地址列表（与 /api/detail 同逻辑：列表接口优先，拿不到再爬详情页） */
   async function fetchEpisodes(source: SourceConfig, id: string, signal: AbortSignal): Promise<string[]> {
     const api = `${source.url.replace(/\/+$/, '')}?ac=videolist&ids=${encodeURIComponent(id)}`;
@@ -337,7 +395,7 @@ export function createQualityProbe({ fetchUpstream, checkUpstreamAllowed, decryp
     source: SourceConfig,
     merged: AbortSignal,
     signal?: AbortSignal
-  ): Promise<{ height?: number; error?: string }> {
+  ): Promise<{ height?: number; bitrate?: number; error?: string }> {
     // 末尾允许 ?query / #fragment：不少源在 .m3u8 后挂鉴权参数或分片锚点
     const isM3u8 = /\.m3u8([?#]|$)/i.test(target);
 
@@ -356,11 +414,13 @@ export function createQualityProbe({ fetchUpstream, checkUpstreamAllowed, decryp
     if (!res.ok) return { error: `HTTP ${res.status}` };
     const text = await readTextPrefix(res, M3U8_MAX_BYTES);
 
-    const height = parseBestHeight(text);
-    if (height !== undefined) return { height };
-
-    // 单码率媒体列表：m3u8 里没有档位信息，下沉到分片挖分辨率
-    return { height: await withSegmentBudget(target, text, source, merged, signal) };
+    const playlistUrl = res.url || target;
+    const [height, bitrate] = await Promise.all([
+      // 单码率媒体列表：m3u8 里没有档位信息，下沉到分片挖分辨率
+      parseBestHeight(text) ?? withSegmentBudget(playlistUrl, text, source, merged, signal),
+      withBitrateBudget(text, playlistUrl, source, merged, signal),
+    ]);
+    return { height, bitrate };
   }
 
   /**
@@ -393,7 +453,7 @@ export function createQualityProbe({ fetchUpstream, checkUpstreamAllowed, decryp
       let lastError: string | undefined;
       for (const target of probeEpisodeOrder(episodes)) {
         const r = await probeEpisode(target, source, merged, signal);
-        if (r.height !== undefined) return { ...base, height: r.height };
+        if (r.height !== undefined) return { ...base, height: r.height, ...(r.bitrate ? { bitrate: r.bitrate } : {}) };
         if (r.error) lastError = r.error;
         // 源站级拒绝（401/403）换集也不会变，不必再耗一轮超时
         if (lastError && /^HTTP (401|403)$/.test(lastError)) break;

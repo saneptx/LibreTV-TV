@@ -129,7 +129,8 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
         val method = request.optString("method", "GET")
         require(method in setOf("GET", "POST", "DELETE")) { "不支持的 HTTP 方法" }
         val body = request.optString("body").toByteArray(Charsets.UTF_8)
-        require(body.size <= 64 * 1024 && (body.isEmpty() || method == "POST")) { "请求体无效或过大" }
+        // 电脑串流会附带设备分析过的媒体列表原文
+        require(body.size <= 2 * 1024 * 1024 && (body.isEmpty() || method == "POST")) { "请求体无效或过大" }
         val originalOrigin = java.net.URI(target.toString()).let { "${it.scheme}://${it.rawAuthority}" }
         for (hop in 0..5) {
             check(!job.cancelled && !Thread.currentThread().isInterrupted) { "请求已取消" }
@@ -174,6 +175,9 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
                     }
                 }
                 val headers = JSONObject().put("Content-Type", connection.contentType ?: "application/octet-stream")
+                // 码率探测用 Range bytes=0-0 读分片总大小
+                connection.getHeaderField("Content-Range")?.let { headers.put("Content-Range", it) }
+                connection.getHeaderField("Content-Length")?.let { headers.put("Content-Length", it) }
                 return JSONObject().put("status", status).put("url", target.toString()).put("headers", headers)
                     .put("body", Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP))
             } finally { connection.disconnect(); job.connection = null }

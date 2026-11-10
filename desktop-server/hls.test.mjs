@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMaster, parseMedia, sliceMedia, targetSize } from './hls.mjs';
+import { parseMaster, parseMedia, sliceMedia, targetSize, repeatedInsertLines } from './hls.mjs';
 import { compactRemovals, cleanPosition, processedPlaylist, readPlaylist } from './processing.mjs';
 import { Readable } from 'node:stream';
 const list=(lines)=>'#EXTM3U\n#EXT-X-TARGETDURATION:4\n'+lines.join('\n')+'\n#EXT-X-ENDLIST\n';
@@ -62,4 +62,12 @@ test('设备标记的广告分片按原文行删除，并计入时间轴',()=>{
  assert.deepEqual(parsed.segments.map(s=>s.url),['https://video.test/a/film0.ts','https://video.test/a/film1.ts']);
  assert.deepEqual(parsed.removed.map(r=>[r.start,r.duration,r.reason]),[[4,3,'device'],[7,3,'device']]);
  assert.equal(parseMedia(body,'https://video.test/a/index.m3u8',{adFilter:false,adSegments:['https://ad.test/x/0.ts']}).removed.length,0);
+});
+test('电脑端重复插入规则：同一非正片目录、时长相同的短段组出现两次以上',()=>{
+ const film=(n,from)=>Array.from({length:n},(_,i)=>`#EXTINF:10,\n/film/${from+i}.ts`).join('\n');
+ const ad=(i)=>`#EXT-X-DISCONTINUITY\n#EXTINF:8.8,\nhttps://ads.test/x/${i}a.ts\n#EXTINF:8.8,\nhttps://ads.test/x/${i}b.ts\n#EXT-X-DISCONTINUITY`;
+ const body=list([film(30,0),ad(1),film(30,30),ad(2),film(30,60)]);
+ assert.deepEqual(repeatedInsertLines(body,'https://v.test/a.m3u8'),['https://ads.test/x/1a.ts','https://ads.test/x/1b.ts','https://ads.test/x/2a.ts','https://ads.test/x/2b.ts']);
+ assert(Math.abs(parseMedia(body,'https://v.test/a.m3u8',{repeatFilter:true}).removedSeconds-35.2)<1e-6);
+ assert.deepEqual(repeatedInsertLines(list([film(30,0),ad(1),film(30,30)]),'https://v.test/a.m3u8'),[]);
 });

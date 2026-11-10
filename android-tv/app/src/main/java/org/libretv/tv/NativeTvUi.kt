@@ -61,6 +61,8 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     private var panelId: String? = null
     private val panelRequests=mutableSetOf<String>()
     private var openingId: String? = null
+    private var compareId: String? = null
+    private var compareText = ""
     private var active: JSONObject? = null
     private var state = JSONObject()
     private var session = ""
@@ -108,6 +110,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         view.addView(playback, FrameLayout.LayoutParams(-1, -1))
         ui.decorate(view)
         buildHome(); buildPlayback()
+        view.viewTreeObserver.addOnGlobalFocusChangeListener { _, focused -> main.removeCallbacks(prefetchFocused); if (focused != null && cardOf[focused] != null) main.postDelayed(prefetchFocused, 800) }
         ui.fontWeight(playerTitle,600); ui.fontWeight(bufferSpeed,500); ui.fontWeight(seekTime,500)
     }
     private fun buildHome() {
@@ -340,6 +343,30 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         items.forEach { item -> val button=ui.button(item.optString("sourceName")) { select(item) }; sourceButtons.add(button); tabs.addView(button,ui.margins(-2,43,6)) }
         p.show(); select(items[0])
     }
+    private var choosingId: String? = null
+    // 遥控器停在多来源影片卡片上 0.8 秒后预探各来源码率，确认时多半已有结果
+    private val cardOf = java.util.WeakHashMap<View, JSONObject>()
+    private val prefetched = mutableSetOf<String>()
+    private val prefetchFocused = Runnable {
+        val card = activity.currentFocus?.let { cardOf[it] } ?: return@Runnable
+        val items = card.optJSONArray("items") ?: return@Runnable
+        if (items.length() > 1 && prefetched.add(card.optString("key", card.optString("name")))) backend.request("prefetch-bitrates", JSONObject().put("items", items))
+    }
+    /** 遥控器确认影片卡片：多个来源时先比较实测码率，播放码率最高的可用来源 */
+    private fun playBest(card: JSONObject) {
+        val items=card.optJSONArray("items") ?: return
+        if (items.length()<=1) { items.optJSONObject(0)?.let { openPlayback(it,0) }; return }
+        if (loadingPlayback || choosingId!=null) return
+        val before=status.text.toString()
+        status.text="正在比较 ${items.length()} 个来源的码率…"
+        choosingId=backend.request("best-source",JSONObject().put("items",items)) { event ->
+            choosingId=null; status.text=before
+            val value=event.optJSONObject("value")
+            val item=value?.optJSONObject("item") ?: items.optJSONObject(0) ?: return@request
+            if (event.optString("event")=="result" && value.optString("quality").isNotEmpty()) toast("已选码率最高的来源：${item.optString("sourceName")} · ${value.optString("quality")}")
+            openPlayback(item,0)
+        }
+    }
     private fun openPlayback(item: JSONObject, index: Int, position: Double? = null) {
         if (loadingPlayback) return
         loadingPlayback = true; openingStatus=status.text.toString()
@@ -359,7 +386,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
                 return@request
             }
             val descriptor = event.optJSONObject("value") ?: return@request
-            savePlayback(); closeDesktopPlayback(); panel?.dialog?.dismiss()
+            savePlayback(); closeDesktopPlayback(); panel?.dialog?.dismiss(); backend.cancel(compareId); compareId=null; compareText=""
             bufferingSince=0L
             active = descriptor; session = "native-${SystemClock.elapsedRealtime()}"; state = JSONObject(); seekPreview = null; qualityHeight = 0; endedSession = ""; desktopFailureSession = ""
             applyConfig(descriptor.optJSONObject("config") ?: config)
@@ -369,9 +396,31 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             player.command(JSONObject().put("version", 1).put("sessionId", session).put("type", "load")
                 .put("request", JSONObject().put("url", url).put("headers", delivery.optJSONObject("headers") ?: JSONObject()).put("delivery", delivery.optString("delivery", "direct")).put("processing",delivery.optString("processing")).put("label",delivery.optString("label")).put("position", descriptor.optDouble("position")).put("adFilter", delivery.optString("processing")!="enhance" && config.optBoolean("adFilter", true))
                 .put("adSegments", if (delivery.optString("processing")=="enhance") JSONArray() else delivery.optJSONArray("adSegments") ?: JSONArray())
-                .put("playlists", if (delivery.optString("delivery")=="desktop") JSONArray() else delivery.optJSONArray("playlists") ?: JSONArray())))
+                .put("playlists", if (delivery.optString("delivery")=="desktop") JSONArray() else delivery.optJSONArray("playlists") ?: JSONArray())
+                .put("timeMap", if (delivery.optString("processing")=="enhance") delivery.optJSONArray("timeMap") ?: JSONArray() else null)))
             command("rate", JSONObject().put("rate", rate)); command("fit", JSONObject().put("fit", fit))
+            startComparison(descriptor.getJSONObject("item"), descriptor.optInt("index"), session)
             showControls(true)
+        }
+    }
+    /** 配置了电脑服务时，后台对同一集的其他来源做音频比对，结果交给播放器跳过夹带广告 */
+    private fun startComparison(item: JSONObject, index: Int, playback: String) {
+        if (!config.optBoolean("adFilter",true) || !config.optBoolean("desktopConfigured")) return
+        compareText="正在多来源比对"
+        compareId=backend.request("compare-ads",JSONObject().put("item",item).put("index",index)) { event ->
+            if (session != playback) return@request
+            when (event.optString("event")) {
+                "compare-progress" -> compareText="正在多来源比对"
+                "error" -> { compareId=null; compareText="多来源比对未完成" }
+                "result" -> {
+                    compareId=null
+                    val value=event.optJSONObject("value") ?: return@request
+                    if (!value.optBoolean("available")) { compareText=""; return@request }
+                    val intervals=value.optJSONArray("intervals") ?: JSONArray()
+                    compareText=if(intervals.length()>0) "多来源比对：跳过 ${intervals.length()} 段 · ${intervals.objects().sumOf { it.optDouble("duration") }.toInt()} 秒" else "多来源比对：未发现夹带广告"
+                    command("skip",JSONObject().put("intervals",intervals))
+                }
+            }
         }
     }
     private fun closeDesktopPlayback() {
@@ -418,8 +467,8 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         val dimensions="${value.optInt("width")}×${value.optInt("height")}"
         playerProcessingVideo.setLabel(if(!value.optBoolean("rendered")) "正在读取实际画面分辨率…" else presentation?.optString("video")
             ?: if(enhanced) "电脑增强 · 处理详情未知，请更新电脑服务" else "${if(delivery?.optString("delivery")=="desktop") "电脑原画转发" else "原始直连"} · 未超分 · 当前 $dimensions")
-        playerProcessingAds.setLabel(presentation?.optString("ads") ?: if(enhanced) "去广告：处理结果未知，请更新电脑服务"
-            else adsLabel())
+        val adsText=presentation?.optString("ads") ?: if(enhanced) "去广告：处理结果未知，请更新电脑服务" else adsLabel()
+        playerProcessingAds.setLabel(listOf(adsText,compareText,presentation?.optString("overlays").orEmpty()).filter { it.isNotEmpty() }.joinToString(" · "))
         playButton.setLabel(if (value.optBoolean("paused")) "▶ 继续播放" else "Ⅱ 暂停")
         prevButton.isEnabled = a.optInt("index") > 0; nextButton.isEnabled = a.optInt("index") < count - 1
         prevButton.alpha = if (prevButton.isEnabled) 1f else .35f; nextButton.alpha = if (nextButton.isEnabled) 1f else .35f
@@ -589,7 +638,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             button.setOnClickListener {
                 val enabled=!config.optBoolean(key,true)
                 backend.request("settings",JSONObject().put(key,enabled)) { event ->
-                    event.optJSONObject("value")?.let { applyConfig(it); button.text=if(enabled) "已开启" else "已关闭"; button.isSelected=enabled; if(key=="adFilter" || key=="superResolution") {
+                    event.optJSONObject("value")?.let { applyConfig(it); button.text=if(enabled) "已开启" else "已关闭"; button.isSelected=enabled; if(key=="adFilter" || key=="superResolution" || key=="overlayRemoval") {
                         val a=active
                         if(a?.optJSONObject("playback")?.optString("processing")=="enhance") openPlayback(a.getJSONObject("item"),a.optInt("index"),originalPosition(state.optDouble("position"),timeMap()))
                         else if(key=="adFilter") command("filter",JSONObject().put("enabled",enabled))
@@ -610,6 +659,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         }
         if(config.optString("playbackMode")=="desktop") {
             val superRow=row("AI 超分"); add(superRow,flag("superResolution")); superRow.addView(ui.text("开启升高一档 · 关闭保持原始分辨率",11,ui.muted),ui.margins(-2,-2))
+            val overlayRow=row("去水印"); add(overlayRow,flag("overlayRemoval")); overlayRow.addView(ui.text("固定台标/水印与滚动广告字幕 · 处理处会有模糊痕迹",11,ui.muted),ui.margins(-2,-2))
         }
         p.show(); rateButtons.getOrNull(listOf(.75,1.0,1.25,1.5,2.0).indexOf(rate))?.requestFocus()
     }
@@ -662,6 +712,14 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             }
         }
         p.content.addView(superToggle,ui.margins(-1,38).apply { topMargin=ui.px(10) })
+        fun overlayLabel()="去水印：${if(config.optBoolean("overlayRemoval",true)) "已开启 · 固定台标/水印与滚动广告字幕" else "已关闭 · 保持原画"}（电脑串流）"
+        val overlayToggle=ui.button(overlayLabel()) {}.apply { style(this); isSelected=config.optBoolean("overlayRemoval",true) }
+        overlayToggle.setOnClickListener {
+            backend.request("settings",JSONObject().put("overlayRemoval",!config.optBoolean("overlayRemoval",true))) { event ->
+                event.optJSONObject("value")?.let { applyConfig(it); overlayToggle.text=overlayLabel(); overlayToggle.isSelected=config.optBoolean("overlayRemoval",true) }
+            }
+        }
+        p.content.addView(overlayToggle,ui.margins(-1,38).apply { topMargin=ui.px(10) })
         p.content.addView(ui.text("串流需电脑服务持续运行；处理能力以连接检测结果为准。",13,ui.muted),ui.margins(-1,-2).apply { topMargin=ui.px(8); bottomMargin=ui.px(8) })
         val server=ui.input("电脑服务地址，例如 http://192.168.1.10:8090").apply { style(this); setText(config.optString("desktopServerUrl")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }
         val pairing=ui.input("电脑服务配对码").apply { style(this); setText(config.optString("desktopPairingToken")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
@@ -819,7 +877,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if (code in setOf(19,20,21,22)) { if(event.action==KeyEvent.ACTION_DOWN) ui.moveFocus(home,code); return true }
         return false
     }
-    fun release() { closeDesktopPlayback(); disposed=true; posters.close(); panel?.dialog?.dismiss(); main.removeCallbacksAndMessages(null) }
+    fun release() { backend.cancel(compareId); closeDesktopPlayback(); disposed=true; posters.close(); panel?.dialog?.dismiss(); main.removeCallbacksAndMessages(null) }
     private inner class MovieAdapter {
         var cards: List<JSONObject> = emptyList()
         var visible=72
@@ -895,10 +953,11 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             (root.getChildAt(2) as TextView).apply { text=meta; isSingleLine=true }
             (root.getChildAt(3) as TextView).apply { text=progressLabel; visibility=if(entry!=null) View.VISIBLE else View.GONE }
             root.contentDescription=if(entry!=null) "历史观看：${card.optString("name")}" else card.optString("name")
+            if(entry==null) cardOf[root]=card else cardOf.remove(root)
             root.setOnClickListener { if(entry!=null) resumeHistory(entry) else openDetail(card) }
             root.setOnKeyListener { _,code,event ->
                 if(code==KeyEvent.KEYCODE_DPAD_CENTER || code==KeyEvent.KEYCODE_ENTER) {
-                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { if(entry!=null) resumeHistory(entry) else card.optJSONArray("items")?.optJSONObject(0)?.let { openPlayback(it,0) } }
+                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { if(entry!=null) resumeHistory(entry) else playBest(card) }
                     true
                 } else false
             }

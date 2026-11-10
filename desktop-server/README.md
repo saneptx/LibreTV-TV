@@ -75,6 +75,8 @@ npm test
 - `GET/HEAD /v1/sessions/:id/processed/index.m3u8` / `:n.ts`：完整去广告 VOD 时间轴与按需编码分段，支持 Range。
 - `GET/HEAD /v1/sessions/:id/media/:asset`：HLS 递归重写，分片/密钥/初始化资源和 MP4 转发；保留 Range 与 206。
 - `DELETE /v1/sessions/:id`：取消媒体请求并清理任务。
+- `POST /v1/sessions` 还接受 `playlists`（设备分析过的媒体列表原文，盗链站按请求动态插入广告时保证与设备标记一致）和 `overlayRemoval`（去水印开关，默认开启）。
+- `POST /v1/compare`：`primary`（URL 与可选列表原文）、`references`（同一集其他来源，最多 3 个）、`adSegments` → 多来源音频比对任务；`GET /v1/compare/:id` 返回 `intervals`（原片时间），`DELETE` 取消。同时最多 2 个比对任务，完成结果缓存 6 小时。
 - 所有请求要求 `Authorization: Bearer <配对码>`。设备凭证不传给上游片源，媒体 URL 不含配对码。
 - 公网目标在每次请求及重定向时检查 DNS，并固定已校验的地址。仅测试参数允许精确指定的本地测试 origin。
 - 暂不支持 DRM、HDR、直播、HLS 变量/内容转向、DASH、多用户权限。未知处理协议直接报错。
@@ -160,3 +162,10 @@ node desktop-server/check-pipeline.mjs
 ```
 
 对比相同 1080P / 29.97 FPS 输入、FSRCNNX、4K 输出和编码参数的串行 4 秒、并行 4 秒、并行 8 秒三种配置，检查真实视频/音轨与下载编码重叠，报告保存至 `.desktop-server/pipeline-gpu-validation.json`。此对照使用内部 `overlapDownloads: false` 创建串行控制组，不会切换或重启现有 8090 服务。运行时应避免其他超分任务争用 GPU。
+
+### 多来源比对与去水印（0.5.0）
+
+- 比对：每个插入约十几次音频测量（每次解码几秒，复用原始分片缓存），本机合成片 10 分钟影片约 4 秒完成；边界误差约 0.1–0.5 秒。参考来源多出的片段不报告；两个参考时取交集。
+- 去水印：处理任务准备阶段抽 10 对灰度帧（约 1–2 秒，按片源缓存），台标用 `delogo`，滚动字幕横条 `gblur` 后覆盖；滤镜位于超分之前，坐标为源像素。处理结果在 `processingInfo.overlays` 中报告，处理缓存随之隔离。
+- 验证：`node desktop-server/check-compare.mjs`、`node desktop-server/check-overlay.mjs`。
+

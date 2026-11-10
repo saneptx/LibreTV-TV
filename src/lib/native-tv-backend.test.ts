@@ -61,6 +61,17 @@ describe('原生电视业务协议', () => {
     browser.LibreTvBackend!.request({ id: 'direct-mode', op: 'settings', args: { playbackMode: 'direct' } });
     await vi.waitFor(() => expect(messages.find((m) => m.id === 'direct-mode')?.value).toMatchObject({ playbackMode: 'direct', selectedKeys: ['env_0', 'env_1'], enabled: 2 }));
   });
+  it('确认影片时比较各来源实测码率，选码率最高且可用的来源，探测结果复用', async () => {
+    const other = { ...item, sourceKey: 'env_1', sourceUrl: 'https://two.test/api', sourceName: '源二', vodId: '7' }, broken = { ...item, vodId: '9' };
+    mock.probe.mockImplementation(async ({ source, id }: { source: { key: string }; id: string }) => id === '9' ? { sourceKey: source.key, vodId: id, error: 'HTTP 403' }
+      : { sourceKey: source.key, vodId: id, height: 1080, bitrate: source.key === 'env_1' ? 4200 : 1800 });
+    await boot();
+    browser.LibreTvBackend!.request({ id: 'best', op: 'best-source', args: { items: [item, other, broken] } });
+    await vi.waitFor(() => expect(messages.find((m) => m.id === 'best' && m.event === 'result')?.value).toMatchObject({ item: { sourceKey: 'env_1' }, bitrate: 4200, quality: '1080P · 4.2M', compared: 3 }));
+    browser.LibreTvBackend!.request({ id: 'again', op: 'best-source', args: { items: [item, other] } });
+    await vi.waitFor(() => expect(messages.find((m) => m.id === 'again' && m.event === 'result')?.value).toMatchObject({ item: { sourceKey: 'env_1' } }));
+    expect(mock.probe).toHaveBeenCalledTimes(3);
+  });
   it('超分设置独立保存，不改变广告过滤和播放模式', async () => {
     await boot();
     browser.LibreTvBackend!.request({ id: 'sr-off', op: 'settings', args: { superResolution: false } });

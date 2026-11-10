@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { desktopAddress, resolvePlaybackDelivery, closeDesktopSession, testDesktopConnection, sourcePosition, sourceDuration } from './desktop-playback';
+import { desktopAddress, resolvePlaybackDelivery, closeDesktopSession, testDesktopConnection, sourcePosition, sourceDuration, compareOnDesktop } from './desktop-playback';
 const settings = { playbackMode: 'desktop' as const, desktopServerUrl: 'http://10.0.2.2:8090', desktopPairingToken: 'test-pairing-code-at-least-24-characters' };
 const id='a'.repeat(32), path=`/v1/sessions/${id}/media/${'b'.repeat(32)}.m3u8`;
 afterEach(() => vi.unstubAllGlobals());
@@ -14,7 +14,7 @@ describe('电脑串流客户端', () => {
     const result=await resolvePlaybackDelivery('https://cdn.test/a.m3u8',settings);
     expect(result.url).toBe(settings.desktopServerUrl+path); expect(result.url).not.toContain(settings.desktopPairingToken);
     expect(result.headers.Authorization).toBe(`Bearer ${settings.desktopPairingToken}`);
-    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({url:'https://cdn.test/a.m3u8',superResolution:true});
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({url:'https://cdn.test/a.m3u8',superResolution:true,overlayRemoval:true});
     await closeDesktopSession(result.desktopSession); expect(fetch.mock.calls[1][1].method).toBe('DELETE');
   });
   it('迟到的创建响应在取消后被清理，不启动旧影片',async () => {
@@ -51,7 +51,7 @@ describe('电脑增强处理协议', () => {
     const path=`/v1/sessions/${id}/processed/index.m3u8`, onProgress=vi.fn();
     const fetch=vi.fn().mockResolvedValueOnce(Response.json({protocol:1,id,path,processing:'enhance'})).mockResolvedValueOnce(Response.json({state:'ready',position:4,label:'电脑 AI 超分 · 1080P',input:{height:720},processingInfo:{sourceWidth:1280,sourceHeight:720,outputWidth:1920,outputHeight:1080,superResolution:true,model:'fsrcnnx',adRemovalEnabled:true,adRemovalSupported:true,removedSegments:1,removedSeconds:2},timeMap:[{start:2,duration:2}]}));vi.stubGlobal('fetch',fetch);
     const result=await resolvePlaybackDelivery('https://cdn.test/a.m3u8',settings,undefined,{position:6,adFilter:true,onProgress});
-    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({url:'https://cdn.test/a.m3u8',superResolution:true,position:6,adFilter:true});expect(result).toMatchObject({processing:'enhance',position:4,sourceHeight:720,timeMap:[{start:2,duration:2}]});expect(onProgress).toHaveBeenCalled();expect(result.presentation?.video).toContain('原始 1280×720 → 当前 1920×1080 · 已超分');expect(result.presentation?.ads).toContain('已去广告：1 个分片 / 2 秒');
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({url:'https://cdn.test/a.m3u8',superResolution:true,overlayRemoval:true,position:6,adFilter:true});expect(result).toMatchObject({processing:'enhance',position:4,sourceHeight:720,timeMap:[{start:2,duration:2}]});expect(onProgress).toHaveBeenCalled();expect(result.presentation?.video).toContain('原始 1280×720 → 当前 1920×1080 · 已超分');expect(result.presentation?.ads).toContain('已去广告：1 个分片 / 2 秒');
   });
   it('关闭超分显式发送开关，去广告独立保留，拒绝旧服务忽略开关', async () => {
     const status = { state: 'ready', input: { height: 720 }, processingInfo: { sourceWidth: 1280, sourceHeight: 720, outputWidth: 1280, outputHeight: 720,
@@ -70,3 +70,19 @@ describe('电脑增强处理协议', () => {
     await expect(resolvePlaybackDelivery('https://cdn.test/a.m3u8',settings)).rejects.toThrow('GPU 不可用');await vi.waitFor(()=>expect(fetch.mock.calls.at(-1)?.[1].method).toBe('DELETE'));
   });
 });
+describe('多来源比对客户端',()=>{
+  it('创建任务后轮询到完成，返回校验过的插入区间',async()=>{
+    const fetch=vi.fn().mockResolvedValueOnce(Response.json({protocol:1,id,state:'running',message:'比对中'})).mockResolvedValueOnce(Response.json({state:'done',references:1,intervals:[{start:311.5,duration:20},{start:-1,duration:5}]}));
+    vi.stubGlobal('fetch',fetch);vi.useFakeTimers();
+    const progress=vi.fn(),pending=compareOnDesktop(settings,{primary:{url:'https://a.test/1.m3u8'},references:['https://b.test/1.m3u8']},undefined,progress);
+    await vi.advanceTimersByTimeAsync(2100);const result=await pending;vi.useRealTimers();
+    expect(result).toEqual({intervals:[{start:311.5,duration:20}],references:1});expect(progress).toHaveBeenCalledWith('比对中');
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({primary:{url:'https://a.test/1.m3u8'},references:['https://b.test/1.m3u8']});
+    expect(fetch.mock.calls[1][0]).toBe(`${settings.desktopServerUrl}/v1/compare/${id}`);
+  });
+  it('旧版电脑服务没有比对接口时给出更新提示',async()=>{
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(Response.json({error:'播放任务不存在或已过期，请重试'},{status:404})));
+    await expect(compareOnDesktop(settings,{primary:{url:'https://a.test/1.m3u8'},references:['https://b.test/1.m3u8']})).rejects.toThrow();
+  });
+});
+

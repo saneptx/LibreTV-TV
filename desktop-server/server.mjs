@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { processedPlaylist } from './processing.mjs';
+import { CompareJob } from './compare.mjs';
 
 const uid = () => randomBytes(16).toString('hex');
 const failure = (status, message) => Object.assign(new Error(message), { status });
@@ -40,7 +41,7 @@ export function rewritePlaylist(body, base, asset) {
 
 export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = false, idleMs = 30 * 60_000, lookupHost = lookup, processor = null } = {}) {
   if (typeof token !== 'string' || token.length < 24 || token.length > 256) throw new Error('需要至少 24 字符的配对码');
-  const secret = Buffer.from(`Bearer ${token}`), sessions = new Map();
+  const secret = Buffer.from(`Bearer ${token}`), sessions = new Map(), comparisons = new Map(), compareResults = new Map();
   const stats = { created: 0, mediaRequests: 0, playlistRequests: 0, rangeRequests: 0, bytes: 0 };
   const testOrigin = allowTestOrigin ? new URL(allowTestOrigin).origin : null;
   function authorized(req) {
@@ -86,6 +87,14 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
     }
     return { response, url: url.href };
   }
+  async function readJson(req) {
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 3 * 1024 * 1024) throw failure(413, '请求过大'); }
+    try { return JSON.parse(body); } catch { throw failure(400, '请求格式无效'); }
+  }
+  const validPlaylists = (list) => list === undefined || Array.isArray(list) && list.length <= 3 && list.every((p) => p && typeof p.url === 'string' && /^https?:\/\//i.test(p.url) && p.url.length <= 4096 && typeof p.text === 'string' && p.text.startsWith('#EXTM3U') && p.text.length <= 2 * 1024 * 1024);
+  const validLines = (list) => list === undefined || Array.isArray(list) && list.length <= 400 && list.every((line) => typeof line === 'string' && line && line.length <= 2048 && !line.startsWith('#') && !/[\r\n]/.test(line));
+  function closeComparison(job) { job.closed = true; job.task?.close(); for (const req of job.requests) req.destroy(); comparisons.delete(job.id); }
   function closeSession(session) {
     session.closed = true; session.pipeline?.close();
     for (const req of session.requests) req.destroy();
@@ -114,14 +123,39 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
       if (!authorized(req)) throw failure(401, '电脑服务配对码不匹配');
       const path = new URL(req.url, 'http://desktop.local').pathname;
       if (path === '/v1/status' && req.method === 'GET') {
-        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, deviceAdSegments: true, superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
+        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, deviceAdSegments: true, devicePlaylists: true, crossSourceCompare: true, overlayRemoval: true, superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
+      }
+      if (path === '/v1/compare' && req.method === 'POST') {
+        if (!processor) throw failure(501, '多来源比对需要电脑增强处理环境');
+        const input = await readJson(req);
+        if (!input?.primary || typeof input.primary.url !== 'string' || !validPlaylists(input.primary.playlists) || !Array.isArray(input.references) || !input.references.length || input.references.length > 5
+          || input.references.some((url) => typeof url !== 'string' || url.length > 4096 || url === input.primary.url) || !validLines(input.adSegments) || input.adFilter !== undefined && typeof input.adFilter !== 'boolean') throw failure(400, '比对参数无效');
+        for (const url of [input.primary.url, ...input.references]) await destination(url);
+        const key = JSON.stringify([input.primary.url, input.references, input.adFilter !== false, input.adSegments || []]);
+        const cached = compareResults.get(key);
+        if (cached && Date.now() - cached.at < 6 * 3600_000) { send(res, 201, { protocol: 1, id: cached.id, ...cached.status }); return; }
+        if ([...comparisons.values()].filter((j) => j.task.info.state === 'running').length >= 2) throw failure(429, '电脑正在进行其他比对，请稍后');
+        const job = { id: uid(), headers: {}, requests: new Set(), touched: Date.now(), closed: false };
+        job.task = new CompareJob({ tools: processor.tools, budget: processor.budget, root: processor.root, runner: processor.runner }, job, input,
+          { open: (url, range, signal) => upstream(url, range ? { Range: `bytes=${range.start}-${range.end}` } : {}, 'GET', job, 0, signal) });
+        job.task.running.then(() => { if (job.task.info.state === 'done') { if (compareResults.size >= 200) compareResults.delete(compareResults.keys().next().value); compareResults.set(key, { id: job.id, status: job.task.status(), at: Date.now() }); } });
+        comparisons.set(job.id, job);
+        send(res, 201, { protocol: 1, id: job.id, ...job.task.status() }); return;
+      }
+      const compareMatch = path.match(/^\/v1\/compare\/([a-f0-9]{32})$/);
+      if (compareMatch) {
+        const job = comparisons.get(compareMatch[1]);
+        const done = [...compareResults.values()].find((r) => r.id === compareMatch[1]);
+        if (req.method === 'GET') { if (job) { job.touched = Date.now(); send(res, 200, job.task.status()); } else if (done) send(res, 200, done.status); else throw failure(404, '比对任务不存在或已过期'); return; }
+        if (req.method === 'DELETE') { if (job) closeComparison(job); send(res, 200, { closed: true }); return; }
+        throw failure(405, '请求方法不支持');
       }
       if (path === '/v1/sessions' && req.method === 'POST') {
         let body = '';
-        for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 131_072) throw failure(413, '请求过大'); }
+        for await (const chunk of req) { body += chunk; if (body.length > 3 * 1024 * 1024) throw failure(413, '请求过大'); }
         let input; try { input = JSON.parse(body); } catch { throw failure(400, '请求格式无效'); }
         if (!input || typeof input.url !== 'string' || input.superResolution !== undefined && typeof input.superResolution !== 'boolean' || input.position !== undefined && (!Number.isFinite(input.position) || input.position < 0)
-          || input.adSegments !== undefined && (!Array.isArray(input.adSegments) || input.adSegments.length > 400 || input.adSegments.some((line) => typeof line !== 'string' || !line || line.length > 2048 || line.startsWith('#') || /[\r\n]/.test(line)))) throw failure(400, '播放参数无效');
+          || !validPlaylists(input.playlists) || !validLines(input.adSegments) || input.overlayRemoval !== undefined && typeof input.overlayRemoval !== 'boolean') throw failure(400, '播放参数无效');
         await destination(input.url);
         if (sessions.size >= 8) throw failure(429, '电脑服务的播放任务已满');
         const headers = {};
@@ -211,8 +245,8 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
     } finally { if (abandoned) { res.removeListener('close', abandoned); abandoned(); } }
   });
   server.requestTimeout = 30_000; server.headersTimeout = 15_000;
-  const cleanup = setInterval(() => { for (const session of sessions.values()) if (Date.now() - session.touched > (session.pipeline?.info.state === 'preparing' ? Math.min(idleMs,30_000) : idleMs)) closeSession(session); }, Math.min(idleMs, 10_000));
+  const cleanup = setInterval(() => { for (const job of comparisons.values()) if (Date.now() - job.touched > Math.min(idleMs, 10 * 60_000)) closeComparison(job); for (const session of sessions.values()) if (Date.now() - session.touched > (session.pipeline?.info.state === 'preparing' ? Math.min(idleMs,30_000) : idleMs)) closeSession(session); }, Math.min(idleMs, 10_000));
   cleanup.unref();
-  server.on('close', () => { clearInterval(cleanup); for (const session of sessions.values()) closeSession(session); });
+  server.on('close', () => { clearInterval(cleanup); for (const job of comparisons.values()) closeComparison(job); for (const session of sessions.values()) closeSession(session); });
   return { server, closeSessions: () => { for (const session of sessions.values()) closeSession(session); } };
 }

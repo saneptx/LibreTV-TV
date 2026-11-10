@@ -45,6 +45,7 @@ export function NativePlayerShell(props: Props) {
         const summary = presentation || {
           video: `${playbackMode === 'desktop' ? '电脑原画转发' : '原始直连'} · 未超分 · 当前 ${next.width}×${next.height}`,
           ads: latest.current.adFilter ? '去广告：设备分片过滤已开启（不含内嵌广告）' : '去广告：已关闭',
+          overlays: '',
         };
         const key = JSON.stringify(summary);
         if (key !== reportedPresentation) { reportedPresentation = key; latest.current.onProcessingPresentation?.(summary); }
@@ -72,7 +73,7 @@ export function NativePlayerShell(props: Props) {
       try {
         const delivery = await resolvePlaybackDelivery(session.url, useAppStore.getState(), controller.signal, { position, adFilter: latest.current.adFilter, onProgress: (value) => { if (!cancelled) latest.current.onProcessingStatus?.(value.message); } });
         timeMap = delivery.timeMap || []; sourceHeight = delivery.sourceHeight; processingRef.current = delivery.processing;
-        presentation = delivery.presentation || (delivery.processing === 'enhance' ? { video: delivery.label || '电脑增强 · 处理详情未知', ads: '去广告：处理结果未知，请更新电脑服务' } : undefined);
+        presentation = delivery.presentation || (delivery.processing === 'enhance' ? { video: delivery.label || '电脑增强 · 处理详情未知', ads: '去广告：处理结果未知，请更新电脑服务', overlays: '' } : undefined);
         desktopSession = delivery.desktopSession;
         if (cancelled) { void closeDesktopSession(desktopSession); desktopSession = undefined; return; }
         const request = delivery.delivery === 'desktop'

@@ -16,7 +16,12 @@ class TvSourceOrderTest {
         assertEquals(listOf("late","low"),sorted)
         assertEquals(listOf("a","b"),TvSourceOrder.sorted(listOf(TvSourceOrder.Value("a",1080),TvSourceOrder.Value("b",1080))))
     }
+    @Test fun sameResolutionPrefersHigherBitrateBeforeLatency() {
+        val rows=listOf(TvSourceOrder.Value("fast-low",1080,true,50,1800),TvSourceOrder.Value("slow-high",1080,true,400,4200),TvSourceOrder.Value("unknown",1080,true,10))
+        assertEquals(listOf("slow-high","fast-low","unknown"),TvSourceOrder.sorted(rows))
+    }
     @Test fun compatibilityLabelsUseNumericResolution() {
+        assertEquals(1080,TvSourceOrder.heightFromLabel("1080P · 2.4M"))
         assertEquals(2160,TvSourceOrder.heightFromLabel("4K"))
         assertEquals(1080,TvSourceOrder.heightFromLabel("1080P"))
         assertEquals(0,TvSourceOrder.heightFromLabel("未知"))

@@ -21,9 +21,33 @@ function byteRange(value, previous, url) {
   if (!Number.isSafeInteger(length) || length < 1 || !Number.isSafeInteger(offset) || offset < 0) throw problem(422, '片源 BYTERANGE 缺少有效偏移');
   return { url, start: offset, end: offset + length - 1 };
 }
-export function parseMedia(text, base, { adFilter = true, adSegments } = {}) {
-  // 设备按编码特征/已学习指纹识别出的分片行，按播放列表原文匹配
-  const flagged = adFilter && adSegments?.length ? new Set(adSegments) : undefined;
+/**
+ * 与设备「重复插入」规则一致：按 DISCONTINUITY 或分片目录变化切段组，同一非正片目录、时长完全相同（≤60 秒）
+ * 的段组出现两次以上即为轮播插入的广告。返回这些分片的原文行。
+ */
+export function repeatedInsertLines(text, base) {
+  const groups = []; let current, duration = 0, boundary = true;
+  const dir = (line) => { try { const u = new URL(line, base); return u.origin + u.pathname.slice(0, u.pathname.lastIndexOf('/') + 1); } catch { return ''; } };
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === '#EXT-X-DISCONTINUITY') boundary = true;
+    else if (line.startsWith('#EXTINF:')) duration = Number(line.slice(8).split(',')[0]) || 0;
+    else if (line && !line.startsWith('#')) {
+      const d = dir(line);
+      if (!current || boundary || d !== current.dir) { current = { dir: d, duration: 0, lines: [] }; groups.push(current); }
+      current.lines.push(line); current.duration += duration; duration = 0; boundary = false;
+    }
+  }
+  if (groups.length < 3 || groups.filter((g) => g.duration <= 180).length > 24) return [];
+  const content = groups.reduce((a, g) => g.duration > a.duration ? g : a).dir, count = new Map();
+  const key = (g) => `${g.dir}|${g.duration.toFixed(2)}`;
+  for (const g of groups) if (g.dir !== content && g.duration > 0 && g.duration <= 60) count.set(key(g), (count.get(key(g)) || 0) + 1);
+  return groups.filter((g) => (count.get(key(g)) || 0) >= 2).flatMap((g) => g.lines);
+}
+export function parseMedia(text, base, { adFilter = true, adSegments, repeatFilter = false } = {}) {
+  // 设备按编码特征/已学习指纹识别出的分片行，按播放列表原文匹配；参考来源等没有设备标记时可用电脑自身的重复插入规则
+  const lines = [...(adSegments || []), ...(repeatFilter ? repeatedInsertLines(text, base) : [])];
+  const flagged = adFilter && lines.length ? new Set(lines) : undefined;
   if (!text.trimStart().startsWith('#EXTM3U')) throw problem(422, '视频清单格式无效');
   if (!text.includes('#EXT-X-ENDLIST')) throw problem(422, '电脑增强目前只支持点播，暂不处理直播清单');
   if (/#EXT-X-(DEFINE|CONTENT-STEERING):|\{\$/.test(text)) throw problem(422, '暂不支持带变量或内容转向的 HLS');

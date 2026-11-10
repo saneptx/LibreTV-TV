@@ -30,4 +30,12 @@ describe('播放处理标注',()=>{
     expect(parseProcessingInfo({...base,sourceWidth:NaN})).toBeUndefined();
     expect(parseProcessingInfo(base)).toEqual(base);
   });
+  it('去水印只按电脑实际报告标注，旧服务不显示',()=>{
+    expect(processingPresentation(base).overlays).toBe('');
+    expect(processingPresentation({...base,overlayRemovalEnabled:false}).overlays).toBe('去水印：已关闭');
+    expect(processingPresentation({...base,overlayRemovalEnabled:true,overlays:[]}).overlays).toBe('去水印：未发现固定水印或滚动字幕');
+    expect(processingPresentation({...base,overlayRemovalEnabled:true,overlays:[{kind:'logo',x:1,y:1,w:10,h:10},{kind:'marquee',x:1,y:90,w:1270,h:60}]}).overlays).toBe('去水印：已处理 台标/水印 1 处、滚动字幕 1 条');
+    expect(parseProcessingInfo({...base,overlayRemovalEnabled:false,overlays:[{kind:'logo',x:1,y:1,w:10,h:10}]})).toBeUndefined();
+    expect(parseProcessingInfo({...base,overlayRemovalEnabled:true,overlays:[{kind:'logo',x:-1,y:1,w:10,h:10}]})).toBeUndefined();
+  });
 });

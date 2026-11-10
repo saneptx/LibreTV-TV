@@ -99,6 +99,7 @@ internal class TvSourcePicker(private val ui: TvWidgets, private val panel: TvWi
     fun quality(result: JSONObject) {
         val id=key(result.getJSONObject("item")); results[id]?.put("quality",result.optString("quality"))
         if(result.optInt("height")>0) results[id]?.put("height",result.optInt("height"))
+        if(result.optInt("bitrate")>0) results[id]?.put("bitrate",result.optInt("bitrate"))
         probes++
         if(tested && !receiving) { updateButton(id); reorder(); if(id==selectedKey) updateDetail(); summary() }
     }
@@ -131,7 +132,7 @@ internal class TvSourcePicker(private val ui: TvWidgets, private val panel: TvWi
     }
     private fun sortedKeys()=TvSourceOrder.sorted(results.map { (id,result) -> TvSourceOrder.Value(id,
         result.optInt("height").takeIf { it>0 } ?: TvSourceOrder.heightFromLabel(result.optString("quality")),
-        result.optBoolean("ok"),result.optInt("ms",Int.MAX_VALUE)) })
+        result.optBoolean("ok"),result.optInt("ms",Int.MAX_VALUE),result.optInt("bitrate")) })
     private fun reorder() {
         val order=sortedKeys()
         order.forEachIndexed { index,id ->

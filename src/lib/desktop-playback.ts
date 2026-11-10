@@ -58,16 +58,43 @@ export async function testDesktopConnection(settings: DesktopSettings, signal?: 
   if (result.protocol !== 1 || result.service !== 'LibreTV Desktop' || !['relay','enhance'].includes(String(result.processing))) throw new Error('电脑服务版本不兼容，请更新服务');
   return result.processing === 'enhance' ? `已连接电脑 · 广告分片过滤 / ${String((result.capabilities as Record<string, unknown>)?.model || 'AI')} 超分 / 编码已启用` : '已连接电脑 · 当前仅串流，去广告和超分尚未启用';
 }
+export interface CompareRequest { primary: { url: string; playlists?: { url: string; text: string }[] }; references: string[]; adFilter?: boolean; adSegments?: string[] }
+export interface CompareResult { intervals: RemovedInterval[]; references: number }
+/** 电脑多来源比对：创建任务后轮询，取消时删除电脑端任务 */
+export async function compareOnDesktop(settings: DesktopSettings, request: CompareRequest, signal?: AbortSignal, onProgress?: (message: string) => void): Promise<CompareResult> {
+  let status = await api(settings, '/v1/compare', 'POST', request, signal);
+  const id = String(status.id || '');
+  if (status.protocol !== 1 || !/^[a-f0-9]{32}$/.test(id)) throw new Error('电脑服务尚不支持多来源比对，请更新电脑服务');
+  try {
+    const deadline = Date.now() + 10 * 60_000;
+    while (status.state === 'running') {
+      if (Date.now() > deadline) throw new Error('多来源比对超时');
+      onProgress?.(String(status.message || '电脑正在多来源比对'));
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(new DOMException('已取消', 'AbortError')); };
+        const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, 2000);
+        if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+      });
+      status = await api(settings, `/v1/compare/${id}`, 'GET', undefined, signal);
+    }
+  } catch (error) { if (signal?.aborted) void api(settings, `/v1/compare/${id}`, 'DELETE').catch(() => undefined); throw error; }
+  if (status.state !== 'done') throw new Error(String(status.error || status.message || '多来源比对失败'));
+  const intervals = Array.isArray(status.intervals) ? (status.intervals as RemovedInterval[]).filter((r) => Number.isFinite(r.start) && Number.isFinite(r.duration) && r.start >= 0 && r.duration > 0 && r.duration <= 600).slice(0, 100) : [];
+  return { intervals, references: Number(status.references) || 0 };
+}
 export async function closeDesktopSession(session?: DesktopSession): Promise<void> {
   if (!session || !/^[a-f0-9]{32}$/.test(session.id)) return;
   try { await api({ desktopServerUrl: session.server, desktopPairingToken: session.token }, `/v1/sessions/${session.id}`, 'DELETE'); }
   catch { /* 断线后由服务端 TTL 清理；不阻塞换集、退出或独立模式。 */ }
 }
-export async function resolvePlaybackDelivery(url: string, settings: DesktopSettings & { playbackMode?: 'direct' | 'desktop'; superResolution?: boolean }, signal?: AbortSignal, options: { position?: number; adFilter?: boolean; adSegments?: string[]; onProgress?: (progress: ProcessingProgress) => void } = {}): Promise<PlaybackDelivery> {
+export async function resolvePlaybackDelivery(url: string, settings: DesktopSettings & { playbackMode?: 'direct' | 'desktop'; superResolution?: boolean; overlayRemoval?: boolean }, signal?: AbortSignal, options: { position?: number; adFilter?: boolean; adSegments?: string[]; playlists?: { url: string; text: string }[]; onProgress?: (progress: ProcessingProgress) => void } = {}): Promise<PlaybackDelivery> {
   if (settings.playbackMode !== 'desktop') return { url, headers: {}, delivery: 'direct' };
   // Do not abort the small create response after it reaches the server: retain its id so a late cancellation can DELETE it.
   if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
-  const result = await api(settings, '/v1/sessions', 'POST', { url, superResolution: settings.superResolution !== false, ...(options.position === undefined ? {} : { position: options.position }), ...(options.adFilter === undefined ? {} : { adFilter: options.adFilter }), ...(options.adSegments?.length ? { adSegments: options.adSegments } : {}) });
+  const create = (extras: boolean) => api(settings, '/v1/sessions', 'POST', { url, superResolution: settings.superResolution !== false, overlayRemoval: settings.overlayRemoval !== false, ...(options.position === undefined ? {} : { position: options.position }), ...(options.adFilter === undefined ? {} : { adFilter: options.adFilter }),
+    ...(extras && options.adSegments?.length ? { adSegments: options.adSegments } : {}), ...(extras && options.playlists?.length ? { playlists: options.playlists } : {}) });
+  // 旧版电脑服务请求体上限较小：去掉设备附带的列表原文和分片标记后重试一次。
+  const result = await create(true).catch((error) => { if (error instanceof Error && error.message === '请求过大' && (options.playlists?.length || options.adSegments?.length)) return create(false); throw error; });
   if (result.protocol !== 1 || typeof result.id !== 'string' || !/^[a-f0-9]{32}$/.test(result.id) || typeof result.path !== 'string' || !['relay','enhance'].includes(String(result.processing)) || !result.path.startsWith(`/v1/sessions/${result.id}/`)) throw new Error('电脑服务返回了无效播放任务');
   const desktopSession = { id: result.id, server: desktopAddress(settings.desktopServerUrl), token: settings.desktopPairingToken.trim() };
   const target = new URL(result.path, desktopSession.server);

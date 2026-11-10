@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { attributes, parseMaster, parseMedia, sliceMedia, targetSize, problem } from './hls.mjs';
+import { ANALYSIS_WIDTH, delogoFilter, detectOverlays, marqueeExtent } from './overlay.mjs';
 import { hash, exists, run, WorkQueue, DiskBudget, check, aborted, vulkanDevice, vulkanFilter, encodingProfile, videoEncoderOptions } from './runtime.mjs';
 const MiB = 1024 ** 2;
 export function compactRemovals(removed) {
@@ -39,29 +40,16 @@ export function createProcessor(tools, { cacheDir = '.desktop-server/cache', cac
   const root = resolve(cacheDir), budget = new DiskBudget(root, cacheBytes), queue = new WorkQueue(), sourceQueue = overlapDownloads ? new WorkQueue() : queue;
   return { tools, budget, queue, sourceQueue, root, runner, prefetch, startupBufferSeconds, overlapDownloads, create: (session, input, network) => new ProcessingSession({ tools, budget, queue, sourceQueue, root, runner, prefetch, startupBufferSeconds }, session, input, network) };
 }
-class ProcessingSession {
+/** 片源读取：缓存的原始下载与本地 HLS 窗口；处理任务与多来源比对共用同一份原始缓存。 */
+export class SourceReader {
   constructor(engine, session, input, network) {
     Object.assign(this, engine, { session, input, network });
-    this.controller = new AbortController(); this.signal = this.controller.signal; this.jobs = new Map(); this.rawPending = new Map(); this.pins = new Map(); this.requested = -1; this.activeWork = 0; this.workElapsed = 0; this.workStarted = 0;
-    this.info = { state: 'preparing', stage: 'source', message: '电脑正在读取视频清单', readySegments: 0, cacheHits: 0, rawCacheHits: 0, processedSeconds: 0, processingSeconds: 0, sourcePreparationSeconds: 0, encodeSeconds: 0, validationSeconds: 0, removedSegments: 0, removedSeconds: 0 };
-    this.preparing = this.prepare().catch((error) => { if (!this.signal.aborted) this.fail(error); });
-  }
-  fail(error) {
-    this.info.state = 'error'; this.info.message = error.status ? error.message : '电脑处理片源失败，请尝试其他片源'; this.info.error = this.info.message;
-    console.error(`[processing ${this.session.id.slice(0,8)}] ${this.info.message}${error.diagnostic ? '\n' + error.diagnostic.slice(-2500) : ''}`);
+    this.controller = new AbortController(); this.signal = this.controller.signal; this.rawPending = new Map(); this.pins = new Map();
+    this.info = { rawCacheHits: 0 };
   }
   update(stage, message) { check(this.signal); this.info.stage = stage; this.info.message = message; }
   pin(file) { if (!this.pins.has(file)) this.pins.set(file, this.budget.pin(file)); return file; }
-  close() { this.controller.abort(); for (const task of this.jobs.values()) task.controller.abort(); for (const unpin of this.pins.values()) unpin(); this.pins.clear(); }
-  timing() {
-    const processingSeconds = (this.workElapsed + (this.activeWork ? performance.now()-this.workStarted : 0))/1000;
-    return { processingSeconds, ...(processingSeconds && this.info.processedSeconds ? { speed:this.info.processedSeconds/processingSeconds } : {}) };
-  }
-  beginWork() {
-    if (this.activeWork++ === 0) this.workStarted = performance.now();
-    return () => { if (--this.activeWork === 0) this.workElapsed += performance.now()-this.workStarted; };
-  }
-  status() { return { ...this.info, ...this.timing(), position: this.position, timeMap: this.timeMap || [], label: this.label || '电脑增强', processing: 'enhance' }; }
+  release() { for (const unpin of this.pins.values()) unpin(); this.pins.clear(); }
   async raw(url, range, provided, signal = this.signal) {
     check(signal);
     const key = await hash(JSON.stringify({ url, headers: this.session.headers, range }));
@@ -90,26 +78,139 @@ class ProcessingSession {
     })();
     this.rawPending.set(key, task); try { return await task; } finally { this.rawPending.delete(key); }
   }
+  /** 全片 10 个位置各抽两帧灰度小图，识别固定水印和滚动字幕；结果按片源缓存，重开不再抽帧 */
+  async overlays(video) {
+    if (this.input.overlayRemoval === false) return [];
+    const w = ANALYSIS_WIDTH, h = Math.max(2, Math.round(w * video.height / video.width / 2) * 2);
+    const file = join(this.root, 'overlays', await hash(JSON.stringify({ version: 2, source: this.mediaSource?.signature || this.url, width: video.width, height: video.height })) + '.json');
+    try { return JSON.parse(await readFile(file, 'utf8')); } catch { /* 首次分析 */ }
+    this.update('overlay', '电脑正在检查画面水印和滚动字幕');
+    const controller = new AbortController(), abort = () => controller.abort(), timer = setTimeout(abort, 30_000);
+    this.signal.addEventListener('abort', abort, { once: true });
+    try {
+      const positions = Array.from({ length: 10 }, (_, i) => this.duration * (.08 + .84 * i / 9)), pairs = [];
+      let next = 0;
+      await Promise.all(Array.from({ length: 3 }, async () => {
+        while (next < positions.length && !controller.signal.aborted) {
+          const frames = await this.frames(positions[next++], w, h, controller.signal).catch(() => undefined);
+          if (frames?.length === 2 * w * h) pairs.push({ a: frames.subarray(0, w * h), b: frames.subarray(w * h) });
+        }
+      }));
+      check(this.signal);
+      if (pairs.length < 6) return [];
+      const regions = detectOverlays(pairs, w, h, Number(video.width), Number(video.height));
+      await mkdir(join(this.root, 'overlays'), { recursive: true, mode: 0o700 }); await writeFile(file, JSON.stringify(regions), { mode: 0o600 });
+      return regions;
+    } finally { clearTimeout(timer); this.signal.removeEventListener('abort', abort); }
+  }
+  /** 本段编码用的叠加物滤镜：台标常驻处理，滚动字幕只在本段确实在滚动时处理 */
+  async overlayFor(start, duration, signal) {
+    const regions = this.overlayRegions || [], bands = regions.filter((r) => r.kind === 'marquee');
+    if (!bands.length) return this.overlayFilter;
+    const w = ANALYSIS_WIDTH, h = Math.max(2, Math.round(w * this.info.input.height / this.info.input.width / 2) * 2), pairs = [];
+    for (const t of [start + duration * .2, start + duration * .65]) {
+      const frames = await this.frames(Math.min(t, this.duration - .5), w, h, signal).catch(() => undefined);
+      if (frames?.length === 2 * w * h) pairs.push({ a: frames.subarray(0, w * h), b: frames.subarray(w * h) });
+    }
+    // 判断不了（取帧失败）时按出现处理，宁可多模糊也不漏掉广告
+    const width = Number(this.info.input.width), height = Number(this.info.input.height);
+    const active = bands.flatMap((band) => {
+      if (!pairs.length) return [band];
+      const found = pairs.map((pair) => marqueeExtent(pair, w, h, band, width, height)).filter(Boolean);
+      if (!found.length) return [];
+      // 取两次采样的并集，覆盖完整字高
+      const y = Math.min(band.y, ...found.map((r) => r.y)), bottom = Math.max(band.y + band.h, ...found.map((r) => r.y + r.h));
+      return [{ ...band, y, h: Math.min(bottom, height - 2) - y }];
+    });
+    return delogoFilter([...regions.filter((r) => r.kind !== 'marquee'), ...active]);
+  }
+  async frames(t, w, h, signal) {
+    const dir = join(this.root, 'work', this.session.id, `overlay-${Math.round(t * 10)}`); await mkdir(dir, { recursive: true, mode: 0o700 });
+    try {
+      let input;
+      if (this.file) input = ['-ss', t.toFixed(3), ...this.inputOptions(false), '-i', this.file];
+      else { const window = await this.localWindow(this.mediaSource, t, 1.5, dir, 'video', signal); input = [...this.inputOptions(true, true), '-i', window.file, '-ss', window.offset.toFixed(3)]; }
+      const { stdout } = await this.runner(this.tools.ffmpeg, ['-hide_banner', '-loglevel', 'error', ...input, '-an', '-frames:v', '2', '-vf', `fps=2.5,scale=${w}:${h},format=gray`, '-f', 'rawvideo', 'pipe:1'],
+        { env: this.tools.env, signal, timeout: 60_000, binary: true, maxBytes: 2 * w * h + 1024 });
+      return stdout;
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+  inputOptions(hls, probe = false) { return hls ? ['-protocol_whitelist','file,crypto,data','-allowed_extensions','ALL',...(probe ? [] : ['-dts_delta_threshold','0.1'])] : ['-protocol_whitelist','file,crypto,data']; }
+  async localWindow(media, start, duration, dir, name, signal = this.signal) {
+    const selected = sliceMedia(media, start, duration); const lines = ['#EXTM3U','#EXT-X-VERSION:6',`#EXT-X-TARGETDURATION:${Math.ceil(Math.max(...selected.segments.map((s) => s.duration)))}`,'#EXT-X-MEDIA-SEQUENCE:0'];
+    let previous;
+    const keyLine = async (key) => key ? `#EXT-X-KEY:METHOD=AES-128,URI="file:${await this.raw(key.url, undefined, undefined, signal)}",IV=${key.iv}` : '#EXT-X-KEY:METHOD=NONE';
+    for (const segment of selected.segments) {
+      check(signal);
+      if (previous !== undefined && (segment.sequence !== previous + 1 || segment.discontinuity)) lines.push('#EXT-X-DISCONTINUITY');
+      if (segment.map) { lines.push(await keyLine(segment.map.key)); lines.push(`#EXT-X-MAP:URI="file:${await this.raw(segment.map.url, segment.map.range, undefined, signal)}"`); }
+      lines.push(await keyLine(segment.key));
+      lines.push(`#EXTINF:${segment.duration},`,`file:${await this.raw(segment.url, segment.range, undefined, signal)}`); previous = segment.sequence;
+    }
+    lines.push('#EXT-X-ENDLIST'); const file = join(dir, name + '.m3u8'); await writeFile(file, lines.join('\n'), { mode: 0o600 }); return { file, offset: selected.offset, hls: true };
+  }
+}
+class ProcessingSession extends SourceReader {
+  constructor(engine, session, input, network) {
+    super(engine, session, input, network);
+    this.jobs = new Map(); this.requested = -1; this.activeWork = 0; this.workElapsed = 0; this.workStarted = 0;
+    this.info = { state: 'preparing', stage: 'source', message: '电脑正在读取视频清单', readySegments: 0, cacheHits: 0, rawCacheHits: 0, processedSeconds: 0, processingSeconds: 0, sourcePreparationSeconds: 0, encodeSeconds: 0, validationSeconds: 0, removedSegments: 0, removedSeconds: 0 };
+    this.preparing = this.prepareWithFallback().catch((error) => { if (!this.signal.aborted) this.fail(error); });
+  }
+  fail(error) {
+    this.info.state = 'error'; this.info.message = error.status ? error.message : '电脑处理片源失败，请尝试其他片源'; this.info.error = this.info.message;
+    console.error(`[processing ${this.session.id.slice(0,8)}] ${this.info.message}${error.diagnostic ? '\n' + error.diagnostic.slice(-2500) : ''}`);
+  }
+  close() { this.controller.abort(); for (const task of this.jobs.values()) task.controller.abort(); this.release(); }
+  timing() {
+    const processingSeconds = (this.workElapsed + (this.activeWork ? performance.now()-this.workStarted : 0))/1000;
+    return { processingSeconds, ...(processingSeconds && this.info.processedSeconds ? { speed:this.info.processedSeconds/processingSeconds } : {}) };
+  }
+  beginWork() {
+    if (this.activeWork++ === 0) this.workStarted = performance.now();
+    return () => { if (--this.activeWork === 0) this.workElapsed += performance.now()-this.workStarted; };
+  }
+  status() { return { ...this.info, ...this.timing(), position: this.position, timeMap: this.timeMap || [], label: this.label || '电脑增强', processing: 'enhance' }; }
   async media(url, adFilter) {
     const result = await this.network.open(url, undefined, this.signal); const body = await readPlaylist(result.response);
     return { ...parseMedia(body, result.url, { adFilter }), signature: await hash(body) };
   }
+  /** 设备给的媒体列表在电脑上被拒（分片按请求 IP 签名）时，改用电脑自己下载的列表重新准备一次 */
+  async prepareWithFallback() {
+    try { await this.prepare(); }
+    catch (error) {
+      if (!this.usedDevicePlaylist || this.signal.aborted || !/HTTP 40[34]/.test(error.message)) throw error;
+      for (const job of this.jobs.values()) job.controller.abort();
+      this.input = { ...this.input, playlists: undefined, adSegments: undefined, repeatFilter: true };
+      this.info.devicePlaylistRejected = true;
+      await this.prepare();
+    }
+  }
   async prepare() {
     await this.budget.reserve(); this.url = this.input.url;
-    let result = await this.network.open(this.url, undefined, this.signal), body, externalAudio;
+    // 盗链站按请求动态插入广告：有设备分析过的媒体列表原文时直接使用，设备标记的分片行才对得上。
+    const provided = new Map((this.input.playlists || []).map((p) => [p.url, p.text]));
+    let target = this.url, body, externalAudio, base;
     for (let depth = 0; depth < 6; depth++) {
-      const type = String(result.response.headers['content-type'] || '');
-      if (!/mpegurl/i.test(type) && !/\.m3u8(?:\?|$)/i.test(result.url)) {
-        this.progressive = true; this.url = result.url; this.file = await this.raw(this.url, undefined, result); break;
+      if (provided.has(target)) { body = provided.get(target); base = target; }
+      else {
+        const result = await this.network.open(target, undefined, this.signal);
+        const type = String(result.response.headers['content-type'] || '');
+        if (!/mpegurl/i.test(type) && !/\.m3u8(?:\?|$)/i.test(result.url)) {
+          this.progressive = true; this.url = result.url; this.file = await this.raw(this.url, undefined, result); break;
+        }
+        body = await readPlaylist(result.response); base = result.url;
+        if (provided.has(base)) body = provided.get(base);
       }
-      body = await readPlaylist(result.response); const variants = parseMaster(body, result.url);
+      const variants = parseMaster(body, base);
       if (variants.length) {
         const maximum = this.tools.targetHeight === 'auto' ? 2160 : this.tools.targetHeight;
         const choice = variants.find((v) => !v.height || v.height <= maximum) || variants.at(-1);
-        externalAudio = choice.audio || externalAudio; result = await this.network.open(choice.url, undefined, this.signal); continue;
+        externalAudio = choice.audio || externalAudio; target = choice.url; continue;
       }
+      this.usedDevicePlaylist = provided.has(base);
       // 独立音轨的分片行不同，设备的额外标记无法对齐音轨，此时只用电脑自身规则。
-      this.mediaSource = { ...parseMedia(body, result.url, { adFilter: this.input.adFilter !== false, adSegments: externalAudio ? undefined : this.input.adSegments }), signature: await hash(body) };
+      this.mediaSource = { ...parseMedia(body, base, { adFilter: this.input.adFilter !== false, adSegments: externalAudio ? undefined : this.input.adSegments, repeatFilter: !!this.input.repeatFilter && !externalAudio }), signature: await hash(body) };
       if (externalAudio) {
         this.audioSource = await this.media(externalAudio, this.input.adFilter !== false);
         if (Math.abs(this.mediaSource.duration - this.audioSource.duration) > .1) throw problem(422, '视频与独立音轨广告时间轴不一致，请换源');
@@ -145,9 +246,12 @@ class ProcessingSession {
     this.info.processingInfo = { sourceWidth: video.width, sourceHeight: video.height, outputWidth: this.size.width, outputHeight: this.size.height,
       superResolution: this.size.superResolution, superResolutionEnabled: this.input.superResolution !== false, model: this.info.output.model, adRemovalEnabled: this.input.adFilter !== false,
       adRemovalSupported: !!this.mediaSource, removedSegments: this.info.removedSegments, removedSeconds: this.info.removedSeconds };
+    this.overlayRegions = await this.overlays(video).catch((error) => { if (this.signal.aborted) throw error; this.info.warning = '画面水印检查失败，按原画处理'; return []; });
+    this.overlayFilter = delogoFilter(this.overlayRegions);
+    Object.assign(this.info.processingInfo, { overlayRemovalEnabled: this.input.overlayRemoval !== false, overlays: this.overlayRegions });
     const outputLabel = this.size.width >= 3840 ? (this.size.height >= 2160 ? '4K' : '4K 宽屏') : `${this.size.height}P`;
-    this.label = `电脑${this.size.superResolution ? ' AI 超分' : '转码'} · ${outputLabel}${this.info.removedSegments ? ` · 过滤 ${this.info.removedSegments} 个广告分片` : ''}`;
-    const signature = await hash(JSON.stringify({ version: 6, url: this.input.url, headers: this.session.headers, source: this.mediaSource?.signature || (await stat(this.file)).size, audio: this.audioSource?.signature, model: this.tools.modelSignature, size: this.size, fps: this.frameRate, encoder: this.tools.encoder, bitrate: this.encodingProfile, chunk: this.chunkDuration, superResolution: this.input.superResolution !== false, adFilter: this.input.adFilter !== false, adSegments: this.input.adSegments?.length ? await hash(JSON.stringify(this.input.adSegments)) : undefined }));
+    this.label = `电脑${this.size.superResolution ? ' AI 超分' : '转码'} · ${outputLabel}${this.info.removedSegments ? ` · 过滤 ${this.info.removedSegments} 个广告分片` : ''}${this.overlayRegions.length ? ` · 去水印 ${this.overlayRegions.length} 处` : ''}`;
+    const signature = await hash(JSON.stringify({ version: 8, url: this.input.url, headers: this.session.headers, source: this.mediaSource?.signature || (await stat(this.file)).size, audio: this.audioSource?.signature, model: this.tools.modelSignature, size: this.size, fps: this.frameRate, encoder: this.tools.encoder, bitrate: this.encodingProfile, chunk: this.chunkDuration, superResolution: this.input.superResolution !== false, adFilter: this.input.adFilter !== false, adSegments: this.input.adSegments?.length ? await hash(JSON.stringify(this.input.adSegments)) : undefined, overlays: this.overlayFilter || undefined }));
     this.directory = join(this.root, 'processed', signature); await mkdir(this.directory, { recursive: true, mode: 0o700 });
     if (firstWork) await rm(firstWork, { recursive: true, force: true });
     const first = Math.floor(this.position / this.chunkDuration);
@@ -165,20 +269,6 @@ class ProcessingSession {
     }));
     check(this.signal); this.info.state = 'ready'; this.update('ready', this.label);
     this.prefetchFrom(first+warmCount-1);
-  }
-  inputOptions(hls, probe = false) { return hls ? ['-protocol_whitelist','file,crypto,data','-allowed_extensions','ALL',...(probe ? [] : ['-dts_delta_threshold','0.1'])] : ['-protocol_whitelist','file,crypto,data']; }
-  async localWindow(media, start, duration, dir, name, signal = this.signal) {
-    const selected = sliceMedia(media, start, duration); const lines = ['#EXTM3U','#EXT-X-VERSION:6',`#EXT-X-TARGETDURATION:${Math.ceil(Math.max(...selected.segments.map((s) => s.duration)))}`,'#EXT-X-MEDIA-SEQUENCE:0'];
-    let previous;
-    const keyLine = async (key) => key ? `#EXT-X-KEY:METHOD=AES-128,URI="file:${await this.raw(key.url, undefined, undefined, signal)}",IV=${key.iv}` : '#EXT-X-KEY:METHOD=NONE';
-    for (const segment of selected.segments) {
-      check(signal);
-      if (previous !== undefined && (segment.sequence !== previous + 1 || segment.discontinuity)) lines.push('#EXT-X-DISCONTINUITY');
-      if (segment.map) { lines.push(await keyLine(segment.map.key)); lines.push(`#EXT-X-MAP:URI="file:${await this.raw(segment.map.url, segment.map.range, undefined, signal)}"`); }
-      lines.push(await keyLine(segment.key));
-      lines.push(`#EXTINF:${segment.duration},`,`file:${await this.raw(segment.url, segment.range, undefined, signal)}`); previous = segment.sequence;
-    }
-    lines.push('#EXT-X-ENDLIST'); const file = join(dir, name + '.m3u8'); await writeFile(file, lines.join('\n'), { mode: 0o600 }); return { file, offset: selected.offset, hls: true };
   }
   async segment(index, warming = false, background = false) {
     check(this.signal);
@@ -208,13 +298,14 @@ class ProcessingSession {
         const start = index*this.chunkDuration, duration = Math.min(this.chunkDuration,this.duration-start);
         const source = this.file ? { file:this.file, offset:start, hls:false } : await this.localWindow(this.mediaSource,start,duration,work,'video',controller.signal);
         const audio = this.audioSource ? await this.localWindow(this.audioSource,start,duration,work,'audio',controller.signal) : source;
+        const overlay = await this.overlayFor(start, duration, controller.signal);
         this.info.sourcePreparationSeconds += (performance.now()-began)/1000;
-        return { source,audio,duration };
+        return { source,audio,duration,overlay };
       },controller.signal,priority);
       check(controller.signal);
       return await this.queue.enqueue(async () => {
         check(controller.signal);
-        const { source,audio,duration } = prepared;
+        const { source,audio,duration,overlay } = prepared;
         const encodingBegan = performance.now();
         const options = { env: this.tools.env, signal: controller.signal, timeout: 5 * 60_000 };
         const input = [...this.inputOptions(source.hls),...(source.hls ? [] : ['-ss',source.offset.toFixed(6)]),'-i',source.file];
@@ -230,13 +321,13 @@ class ProcessingSession {
           const audioFilter = `atrim=start=${audio.hls ? audio.offset.toFixed(6) : '0'}:duration=${duration.toFixed(6)},asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,apad`;
           await this.runner(this.tools.ffmpeg,['-hide_banner','-loglevel','error','-threads','2',...(upscale ? vulkanDevice(this.tools) : []),...input,
             ...audioInput,'-map','0:v:0',...(this.hasAudio ? ['-map',`${separateAudio ? 1 : 0}:a:0`,'-c:a','aac','-b:a','128k','-ac','2','-ar','48000','-af',audioFilter] : ['-an']),
-            '-t',duration.toFixed(6),'-frames:v',String(Math.ceil(duration*this.fps-.000001)),'-vf',`${videoTrim},${filter}`,
+            '-t',duration.toFixed(6),'-frames:v',String(Math.ceil(duration*this.fps-.000001)),'-vf',`${videoTrim},${overlay ? overlay + ',' : ''}${filter}`,
             '-c:v',this.tools.encoder,...encoder,'-pix_fmt','yuv420p','-g',String(this.chunkFrames),'-bf','0','-mpegts_flags','+resend_headers','-muxdelay','0','-muxpreload','0','-f','mpegts','-y',partial],options);
         } else {
           if (this.hasAudio) await this.runner(this.tools.ffmpeg, ['-hide_banner','-loglevel','error','-threads','2',...this.inputOptions(audio.hls),...(audio.hls ? ['-i',audio.file,'-ss',audio.offset.toFixed(6)] : ['-ss',audio.offset.toFixed(6),'-i',audio.file]),'-t',duration.toFixed(6),'-vn','-ac','2','-ar','48000','-af','asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0','-c:a','pcm_s16le','-y',join(work,'audio.wav')], options);
           const frames = join(work, 'frames'), enhanced = join(work, 'enhanced'); await mkdir(frames); await mkdir(enhanced);
           if (warming) this.update('decode', '电脑正在解码首段视频');
-          await this.runner(this.tools.ffmpeg, ['-hide_banner','-loglevel','error','-threads','2',...input,'-t',duration.toFixed(6),'-an','-vf',`${videoTrim},fps=${this.frameRate}`,'-frames:v',String(Math.ceil(duration * this.fps - .000001)),'-fps_mode','cfr','-y',join(frames,'%08d.png')], options);
+          await this.runner(this.tools.ffmpeg, ['-hide_banner','-loglevel','error','-threads','2',...input,'-t',duration.toFixed(6),'-an','-vf',`${videoTrim},${overlay ? overlay + ',' : ''}fps=${this.frameRate}`,'-frames:v',String(Math.ceil(duration * this.fps - .000001)),'-fps_mode','cfr','-y',join(frames,'%08d.png')], options);
           const frameCount = (await readdir(frames)).filter((s) => s.endsWith('.png')).length;
           if (!frameCount) throw problem(502, '电脑未能从片源解码出画面');
           let imageDir = frames;

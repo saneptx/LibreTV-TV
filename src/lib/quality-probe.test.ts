@@ -210,11 +210,20 @@ describe('probeQuality 降级到分片解析', () => {
 
     const result = await probeQuality({ source: SOURCE, id: '123' });
     expect(result.height).toBe(1080);
-    // 详情接口 + m3u8，仅此两次：多码率源没有理由再拉分片
-    expect(urls()).toEqual([
+    // 画质直接取自 master；之后只为码率读档位列表和分片大小（Range bytes=0-0），不下载分片内容
+    expect(urls().slice(0, 2)).toEqual([
       'https://api.test/api.php/provide/vod?ac=videolist&ids=123',
       PLAYLIST_URL,
     ]);
+    for (const [url, options] of mocks.fetchUpstream.mock.calls.slice(2)) expect(/\.m3u8$/.test(url as string) || (options as { headers: Record<string, string> }).headers.Range === 'bytes=0-0').toBe(true);
+  });
+
+  it('实测码率：分片总字节 ÷ 时长，只读分片大小', async () => {
+    currentPlaylist = '#EXTM3U\n#EXT-X-TARGETDURATION:10\n' + Array.from({ length: 10 }, (_, i) => `#EXTINF:10.0,\nseg${i}.ts`).join('\n') + '\n#EXT-X-ENDLIST\n';
+    mocks.fetchUpstream.mockImplementation((url: string, options: { headers: Record<string, string> }) => Promise.resolve(
+      options.headers.Range === 'bytes=0-0' ? new Response(new Uint8Array(1), { status: 206, headers: { 'Content-Range': 'bytes 0-0/3000000' } }) : route(url)));
+    const result = await probeQuality({ source: SOURCE, id: '123' });
+    expect(result.bitrate).toBe(2400);
   });
 
   it('单码率 m3u8：下沉到 TS 分片，从 SPS 拿到 1080', async () => {
