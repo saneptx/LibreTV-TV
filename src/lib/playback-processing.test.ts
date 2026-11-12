@@ -30,6 +30,11 @@ describe('播放处理标注',()=>{
     expect(parseProcessingInfo({...base,sourceWidth:NaN})).toBeUndefined();
     expect(parseProcessingInfo(base)).toEqual(base);
   });
+  it('电脑按设备能力输出 HEVC 时在画面标注中注明',()=>{
+    expect(processingPresentation({...base,codec:'hevc'}).video).toMatch(/ · HEVC$/);
+    expect(processingPresentation({...base,codec:'h264'}).video).not.toContain('HEVC');
+    expect(parseProcessingInfo({...base,codec:'vp9'})).toBeUndefined();
+  });
   it('去水印只按电脑实际报告标注，旧服务不显示',()=>{
     expect(processingPresentation(base).overlays).toBe('');
     expect(processingPresentation({...base,overlayRemovalEnabled:false}).overlays).toBe('去水印：已关闭');

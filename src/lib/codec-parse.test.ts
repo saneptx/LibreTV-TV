@@ -9,7 +9,7 @@ import {
   parseTsVideoResolution,
   unescapeRbsp,
 } from './codec-parse';
-import { parseTsSignature } from './codec-parse-core';
+import { parseTsFirstPts, parseTsSignature } from './codec-parse-core';
 
 /** 位写入器：手写 SPS 的二进制极易出错，用语法元素逐项构造 */
 class BitWriter {
@@ -297,6 +297,34 @@ describe('parseTsSignature', () => {
     const es = concat([new Uint8Array([0x00, 0x00, 0x00, 0x01]), new Uint8Array([0x26, 0x01, 0x02])]);
     const hevc = concat([buildTsPacket(0x0000, buildPat(0x1000), true), buildTsPacket(0x1000, buildPmt(0x0100, 0x24), true), ...packetize(0x0100, buildPes(es))]);
     expect(parseTsSignature(hevc)).toBeUndefined();
+  });
+});
+
+describe('parseTsFirstPts', () => {
+  /** 带 PTS 的 PES 头（PTS_DTS_flags=10，header_length=5） */
+  const pesWithPts = (streamId: number, seconds: number) => {
+    const pts = Math.round(seconds * 90000);
+    const pes = new Uint8Array(14 + 4);
+    pes.set([0x00, 0x00, 0x01, streamId, 0x00, 0x00, 0x80, 0x80, 0x05], 0);
+    pes.set([0x21 | (Math.floor(pts / 2 ** 29) & 0x0e), Math.floor(pts / 2 ** 22) & 0xff, (Math.floor(pts / 2 ** 14) & 0xfe) | 1, Math.floor(pts / 2 ** 7) & 0xff, ((pts * 2) & 0xfe) | 1], 9);
+    pes.set([0x00, 0x00, 0x00, 0x01], 14);
+    return pes;
+  };
+  const head = [buildTsPacket(0x0000, buildPat(0x1000), true), buildTsPacket(0x1000, buildPmt(0x0100), true)];
+
+  it('取视频轨第一个 PES 的时间戳，排在前面的音频不算', () => {
+    const buf = concat([...head, buildTsPacket(0x0101, pesWithPts(0xc0, 11.2), true), buildTsPacket(0x0100, pesWithPts(0xe0, 363.41), true)]);
+    expect(parseTsFirstPts(buf)).toBeCloseTo(363.41, 4);
+  });
+
+  it('前缀里没有视频 PES 时退回第一个带时间戳的 PES；超过 32 位的时间戳也能还原', () => {
+    expect(parseTsFirstPts(concat([...head, buildTsPacket(0x0101, pesWithPts(0xc0, 11.2), true)]))).toBeCloseTo(11.2, 4);
+    expect(parseTsFirstPts(concat([...head, buildTsPacket(0x0100, pesWithPts(0xe0, 60000), true)]))).toBeCloseTo(60000, 4);
+  });
+
+  it('没有时间戳或不是 TS 时返回 undefined', () => {
+    expect(parseTsFirstPts(buildTsWithSps(buildSps({ widthInMbs: 80, heightInMapUnits: 45 })))).toBeUndefined();
+    expect(parseTsFirstPts(new Uint8Array(600).fill(0x5a))).toBeUndefined();
   });
 });
 

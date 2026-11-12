@@ -33,7 +33,8 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
         @Volatile var cancelled = false
         fun cancel() { cancelled = true; connection?.disconnect(); future?.cancel(true) }
     }
-    private val executor = ThreadPoolExecutor(6, 6, 30, TimeUnit.SECONDS, ArrayBlockingQueue(128))
+    // 8 个线程：广告分析按段组并发读取分片开头的时间戳
+    private val executor = ThreadPoolExecutor(8, 8, 30, TimeUnit.SECONDS, ArrayBlockingQueue(128))
     private val jobs = ConcurrentHashMap<String, Job>()
     @Volatile private var disposed = false
 
@@ -146,6 +147,7 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
                 }
             }
             job.connection = connection
+            var reusable = false
             try {
                 if (method == "POST" && body.isNotEmpty()) {
                     connection.doOutput = true
@@ -161,12 +163,13 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
                 }
                 val output = ByteArrayOutputStream()
                 val input = if (status >= 400) connection.errorStream else connection.inputStream
+                var complete = input == null
                 input?.use {
                     val buffer = ByteArray(8192)
                     while (true) {
                         check(!job.cancelled && !Thread.currentThread().isInterrupted) { "请求已取消" }
                         val count = it.read(buffer, 0, minOf(buffer.size, limit - output.size() + 1))
-                        if (count < 0) break
+                        if (count < 0) { complete = true; break }
                         if (output.size() + count > limit) {
                             if (!request.optBoolean("prefix")) error("响应内容过大")
                             output.write(buffer, 0, limit - output.size()); break
@@ -178,9 +181,12 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
                 // 码率探测用 Range bytes=0-0 读分片总大小
                 connection.getHeaderField("Content-Range")?.let { headers.put("Content-Range", it) }
                 connection.getHeaderField("Content-Length")?.let { headers.put("Content-Length", it) }
+                // 响应体完整读完时不断开：连接回到复用池，同一 CDN 的下一个请求省掉 TLS 握手
+                // （投影仪上一次握手约 1 秒，广告分析要连续读几十个分片开头）
+                if (complete) reusable = true
                 return JSONObject().put("status", status).put("url", target.toString()).put("headers", headers)
                     .put("body", Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP))
-            } finally { connection.disconnect(); job.connection = null }
+            } finally { if (!reusable) connection.disconnect(); job.connection = null }
         }
         error("重定向次数过多")
     }

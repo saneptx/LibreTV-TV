@@ -5,11 +5,17 @@ vi.mock('./codec-parse-core', () => ({
   parseMp4VideoResolution: () => undefined,
   // 测试分片前 24 字节写入特征文本，其余补零
   parseTsSignature: (buf: Uint8Array) => new TextDecoder().decode(buf.subarray(0, 24)).replace(/\0+$/, '') || undefined,
+  // 第 300 字节起写入首帧时间戳（秒）
+  parseTsFirstPts: (buf: Uint8Array) => { const text = new TextDecoder().decode(buf.subarray(300, 340)).replace(/\0+$/, ''); return text ? Number(text) : undefined; },
 }));
 
 import { analyzePlaylist, decideAds, heuristicRemovedLines, learnAdAt, loadLearnedAds, playlistGroups, saveLearnedAd, clearLearnedAds, type AdTransport } from './ad-analysis';
 
-const segment = (sig: string, salt = '') => { const buf = new Uint8Array(400); buf.set(new TextEncoder().encode(sig)); buf.set(new TextEncoder().encode(salt), 100); return buf; };
+const segment = (sig: string, salt = '', pts?: number) => {
+  const buf = new Uint8Array(400); buf.set(new TextEncoder().encode(sig)); buf.set(new TextEncoder().encode(salt), 100);
+  if (pts !== undefined) buf.set(new TextEncoder().encode(String(pts)), 300);
+  return buf;
+};
 function transport(playlists: Record<string, string>, segments: Record<string, Uint8Array>): AdTransport & { fetched: string[] } {
   const fetched: string[] = [];
   return {
@@ -98,6 +104,66 @@ describe('编码特征比对', () => {
   it('非 m3u8 或读取失败时不分析', async () => {
     expect(await analyzePlaylist('https://cdn.test/a.mp4', transport({}, {}))).toEqual([]);
     expect(await analyzePlaylist(BASE, transport({}, {}))).toEqual([]);
+  });
+});
+
+describe('时间轴接续', () => {
+  // 30 组、每组 5 个 2 秒分片（段组很多，不建完整指纹）；编码全部相同
+  const build = (insertAt: number, adSeconds: number, resume = true) => {
+    const parts: string[] = [], segs: Record<string, Uint8Array> = {};
+    let start = 0;
+    for (let k = 0; k < 30; k++) {
+      const ad = k === insertAt, seconds = ad ? adSeconds : 10, count = seconds / 2;
+      parts.push(group(`c${k}`, 2, count, k > 0));
+      // 正片时间戳 = 原片位置 + 1.4（插入之后整体少掉广告的长度）；广告从 1.4 秒重新开始
+      const shift = k > insertAt && resume ? -adSeconds : k > insertAt ? 500 : 0;
+      segs[content(`c${k}/0.ts`)] = segment('ts|1b,f|1920x1080', String(k), ad ? 1.4 : start + 1.4 + shift);
+      start += seconds;
+    }
+    return { text: `#EXTM3U\n${parts.join('\n')}\n#EXT-X-ENDLIST`, segs };
+  };
+
+  it('插入的短段自带时间戳、之后正片接回插入前的位置 → 判为广告（编码相同、段组很多也能识别）', async () => {
+    const { text, segs } = build(12, 24);
+    const decision = decideAds(await analyzePlaylist(BASE, transport({ [BASE]: text }, segs)), []);
+    expect(decision).toMatchObject({ timelineGroups: 1, codecGroups: 0 });
+    expect(decision.extraLines).toEqual(Array.from({ length: 12 }, (_, i) => `c12/${i}.ts`));
+  });
+
+  it('插入点前面正片不足 90 秒（含开头插播）→ 只看时间戳无法区分，不删除', async () => {
+    for (const at of [0, 5]) {
+      const { text, segs } = build(at, 24);
+      expect(decideAds(await analyzePlaylist(BASE, transport({ [BASE]: text }, segs)), []).extraLines).toEqual([]);
+    }
+  });
+
+  it('时间轴换了但没有接回（多个文件拼接） → 不删除', async () => {
+    const { text, segs } = build(12, 24, false);
+    expect(decideAds(await analyzePlaylist(BASE, transport({ [BASE]: text }, segs)), []).extraLines).toEqual([]);
+  });
+
+  it('段组很多时分层抽查，只读插入点附近的组', async () => {
+    const parts: string[] = [], segs: Record<string, Uint8Array> = {};
+    let start = 0;
+    for (let k = 0; k < 400; k++) {
+      const ad = k === 233, seconds = ad ? 30 : 4;
+      parts.push(group(`c${k}`, 2, seconds / 2, k > 0));
+      segs[content(`c${k}/0.ts`)] = segment('ts|1b,f|1920x1080', String(k), ad ? 0.7 : start + 0.7 - (k > 233 ? 30 : 0));
+      start += seconds;
+    }
+    const t = transport({ [BASE]: `#EXTM3U\n${parts.join('\n')}\n#EXT-X-ENDLIST` }, segs);
+    const decision = decideAds(await analyzePlaylist(BASE, t), []);
+    expect(decision.timelineGroups).toBe(1);
+    expect(decision.extraLines).toEqual(Array.from({ length: 15 }, (_, i) => `c233/${i}.ts`));
+    expect(t.fetched.length).toBeLessThan(60);
+  });
+
+  it('插入段超过 90 秒不按时间轴判定；读不到时间戳的组不参与', async () => {
+    const { text, segs } = build(12, 100);
+    expect(decideAds(await analyzePlaylist(BASE, transport({ [BASE]: text }, segs)), []).timelineGroups).toBe(0);
+    const short = build(12, 24);
+    short.segs[content('c13/0.ts')] = segment('ts|1b,f|1920x1080');
+    expect(decideAds(await analyzePlaylist(BASE, transport({ [BASE]: short.text }, short.segs)), []).timelineGroups).toBe(0);
   });
 });
 

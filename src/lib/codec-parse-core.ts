@@ -354,6 +354,42 @@ export function parseTsSignature(buf: Uint8Array): string | undefined {
   return `ts|${types.map((t) => t.toString(16)).join(',')}|${size.width}x${size.height}`;
 }
 
+/**
+ * 分片里第一个视频 PES 的显示时间戳（秒，90 kHz 时钟，未处理 33 位回绕）。
+ * 前缀里没有视频 PES 时退回第一个带 PTS 的 PES（多为音频）。用来判断段组之间时间轴是否接续。
+ */
+export function parseTsFirstPts(buf: Uint8Array): number | undefined {
+  const start = findTsOffset(buf);
+  if (start < 0) return undefined;
+  let pmtPid = -1, videoPid = -1;
+  let fallback: number | undefined;
+  for (const packet of readTsPackets(buf, start)) {
+    if (!packet.payloadStart) continue;
+    if (packet.pid === 0x0000) { if (pmtPid < 0) pmtPid = parsePat(packet.payload); continue; }
+    if (packet.pid === pmtPid) { if (videoPid < 0) videoPid = parseVideoPid(packet.payload); continue; }
+    const p = packet.payload;
+    // PES 头：00 00 01 stream_id len(2) flags(2) header_len，PTS_DTS_flags 在第 8 字节高两位
+    if (p.length < 14 || p[0] !== 0 || p[1] !== 0 || p[2] !== 1 || (p[7] & 0x80) === 0) continue;
+    const pts = (p[9] & 0x0e) * 536870912 + p[10] * 4194304 + (p[11] & 0xfe) * 16384 + p[12] * 128 + (p[13] >> 1);
+    if (packet.pid === videoPid) return pts / 90000;
+    fallback ??= pts / 90000;
+  }
+  return fallback;
+}
+
+/** PMT 里第一条视频轨（MPEG-2 / H.264 / HEVC）的 PID */
+function parseVideoPid(payload: Uint8Array): number {
+  const begin = 1 + payload[0];
+  if (begin + 12 > payload.length || payload[begin] !== 0x02) return -1;
+  const sectionLength = ((payload[begin + 1] & 0x0f) << 8) | payload[begin + 2];
+  const end = begin + 3 + sectionLength - 4;
+  const programInfoLength = ((payload[begin + 10] & 0x0f) << 8) | payload[begin + 11];
+  for (let p = begin + 12 + programInfoLength; p + 5 <= end && p + 5 <= payload.length; p += 5 + (((payload[p + 3] & 0x0f) << 8) | payload[p + 4])) {
+    if ([0x02, 0x1b, 0x24].includes(payload[p])) return ((payload[p + 1] & 0x1f) << 8) | payload[p + 2];
+  }
+  return -1;
+}
+
 // ——— MP4 / fMP4 ———
 
 /** 承载分辨率的 visual sample entry */

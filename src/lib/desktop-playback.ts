@@ -23,7 +23,7 @@ export interface PlaybackDelivery {
   sourceHeight?: number;
   /** 设备侧识别出的额外广告分片行（编码不一致 / 已学习），直连时交给 Media3 过滤器 */
   adSegments?: string[];
-  adSummary?: { codecGroups: number; learnedGroups: number; repeatGroups: number };
+  adSummary?: { codecGroups: number; learnedGroups: number; repeatGroups: number; timelineGroups?: number };
   /** 直连时播放器使用与分析相同的媒体列表原文 */
   playlists?: { url: string; text: string }[];
   processingInfo?: ProcessingInfo;
@@ -58,6 +58,19 @@ export async function testDesktopConnection(settings: DesktopSettings, signal?: 
   if (result.protocol !== 1 || result.service !== 'LibreTV Desktop' || !['relay','enhance'].includes(String(result.processing))) throw new Error('电脑服务版本不兼容，请更新服务');
   return result.processing === 'enhance' ? `已连接电脑 · 广告分片过滤 / ${String((result.capabilities as Record<string, unknown>)?.model || 'AI')} 超分 / 编码已启用` : '已连接电脑 · 当前仅串流，去广告和超分尚未启用';
 }
+/** 设备硬件解码能力（APK 上报），电脑据此选择 HEVC 或 H.264 输出 */
+export type DecoderReport = Partial<Record<'hevc' | 'h264' | 'av1', { maxWidth: number; maxHeight: number; fps1080: number; fps2160: number }>>;
+export function sanitizeDecoders(value: unknown): DecoderReport | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const result: DecoderReport = {};
+  for (const codec of ['hevc', 'h264', 'av1'] as const) {
+    const d = (value as Record<string, Record<string, unknown>>)[codec];
+    if (!d || typeof d !== 'object') continue;
+    const n = (k: string) => { const v = Number(d[k]); return Number.isFinite(v) && v >= 0 && v <= 8192 ? Math.round(v) : 0; };
+    result[codec] = { maxWidth: n('maxWidth'), maxHeight: n('maxHeight'), fps1080: n('fps1080'), fps2160: n('fps2160') };
+  }
+  return Object.keys(result).length ? result : undefined;
+}
 export interface CompareRequest { primary: { url: string; playlists?: { url: string; text: string }[] }; references: string[]; adFilter?: boolean; adSegments?: string[] }
 export interface CompareResult { intervals: RemovedInterval[]; references: number }
 /** 电脑多来源比对：创建任务后轮询，取消时删除电脑端任务 */
@@ -82,16 +95,33 @@ export async function compareOnDesktop(settings: DesktopSettings, request: Compa
   const intervals = Array.isArray(status.intervals) ? (status.intervals as RemovedInterval[]).filter((r) => Number.isFinite(r.start) && Number.isFinite(r.duration) && r.start >= 0 && r.duration > 0 && r.duration <= 600).slice(0, 100) : [];
   return { intervals, references: Number(status.references) || 0 };
 }
+/** 电脑片库条目（电脑后台处理完整集后保存） */
+export interface DesktopDownload {
+  id: string; url: string; title: string; subtitle: string; state: 'queued' | 'preparing' | 'downloading' | 'done' | 'error';
+  done: number; segments?: number; bytes: number; duration?: number; label?: string; error?: string; createdAt: number;
+  meta?: { sourceKey?: string; sourceName?: string; sourceUrl?: string; vodId?: string; index?: number; name?: string; pic?: string };
+}
+export async function listDesktopDownloads(settings: DesktopSettings, signal?: AbortSignal): Promise<DesktopDownload[]> {
+  const result = await api(settings, '/v1/downloads', 'GET', undefined, signal);
+  return Array.isArray(result.items) ? result.items as DesktopDownload[] : [];
+}
+export async function addDesktopDownload(settings: DesktopSettings, body: Record<string, unknown>, signal?: AbortSignal): Promise<DesktopDownload> {
+  return await api(settings, '/v1/downloads', 'POST', body, signal) as unknown as DesktopDownload;
+}
+export async function removeDesktopDownload(settings: DesktopSettings, id: string): Promise<void> {
+  if (!/^[a-f0-9]{32}$/.test(id)) throw new Error('无效的下载');
+  await api(settings, `/v1/downloads/${id}`, 'DELETE');
+}
 export async function closeDesktopSession(session?: DesktopSession): Promise<void> {
   if (!session || !/^[a-f0-9]{32}$/.test(session.id)) return;
   try { await api({ desktopServerUrl: session.server, desktopPairingToken: session.token }, `/v1/sessions/${session.id}`, 'DELETE'); }
   catch { /* 断线后由服务端 TTL 清理；不阻塞换集、退出或独立模式。 */ }
 }
-export async function resolvePlaybackDelivery(url: string, settings: DesktopSettings & { playbackMode?: 'direct' | 'desktop'; superResolution?: boolean; overlayRemoval?: boolean }, signal?: AbortSignal, options: { position?: number; adFilter?: boolean; adSegments?: string[]; playlists?: { url: string; text: string }[]; onProgress?: (progress: ProcessingProgress) => void } = {}): Promise<PlaybackDelivery> {
+export async function resolvePlaybackDelivery(url: string, settings: DesktopSettings & { playbackMode?: 'direct' | 'desktop'; superResolution?: boolean; overlayRemoval?: boolean }, signal?: AbortSignal, options: { position?: number; adFilter?: boolean; adSegments?: string[]; playlists?: { url: string; text: string }[]; decoders?: DecoderReport; onProgress?: (progress: ProcessingProgress) => void } = {}): Promise<PlaybackDelivery> {
   if (settings.playbackMode !== 'desktop') return { url, headers: {}, delivery: 'direct' };
   // Do not abort the small create response after it reaches the server: retain its id so a late cancellation can DELETE it.
   if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
-  const create = (extras: boolean) => api(settings, '/v1/sessions', 'POST', { url, superResolution: settings.superResolution !== false, overlayRemoval: settings.overlayRemoval !== false, ...(options.position === undefined ? {} : { position: options.position }), ...(options.adFilter === undefined ? {} : { adFilter: options.adFilter }),
+  const create = (extras: boolean) => api(settings, '/v1/sessions', 'POST', { url, superResolution: settings.superResolution !== false, overlayRemoval: settings.overlayRemoval !== false, ...(options.decoders ? { decoders: options.decoders } : {}), ...(options.position === undefined ? {} : { position: options.position }), ...(options.adFilter === undefined ? {} : { adFilter: options.adFilter }),
     ...(extras && options.adSegments?.length ? { adSegments: options.adSegments } : {}), ...(extras && options.playlists?.length ? { playlists: options.playlists } : {}) });
   // 旧版电脑服务请求体上限较小：去掉设备附带的列表原文和分片标记后重试一次。
   const result = await create(true).catch((error) => { if (error instanceof Error && error.message === '请求过大' && (options.playlists?.length || options.adSegments?.length)) return create(false); throw error; });

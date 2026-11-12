@@ -22,10 +22,10 @@ internal class TvPosterLoader {
     private val connections = java.util.Collections.newSetFromMap(ConcurrentHashMap<HttpURLConnection, Boolean>())
     private val cache = object : LruCache<String, Bitmap>(12 * 1024 * 1024) { override fun sizeOf(key: String, value: Bitmap) = value.byteCount }
     @Volatile private var closed = false
-    fun load(view: ImageView, url: String) {
+    fun load(view: ImageView, url: String, onLoaded: (() -> Unit)? = null) {
         view.tag = url; view.setImageDrawable(null)
         if (url.isBlank() || closed) return
-        cache.get(url)?.let { view.setImageBitmap(it); return }
+        cache.get(url)?.let { view.setImageBitmap(it); onLoaded?.invoke(); return }
         executor.execute {
             try {
                 if(closed || view.tag!=url || !view.isAttachedToWindow) return@execute
@@ -34,6 +34,8 @@ internal class TvPosterLoader {
                 val connection = (target.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 8000; readTimeout = 8000
                     setRequestProperty("User-Agent", "Mozilla/5.0 LibreTV-AndroidTV/0.4")
+                    // 豆瓣的海报图床校验来路
+                    if (target.host.endsWith("doubanio.com")) setRequestProperty("Referer", "https://movie.douban.com/")
                 }
                 connections.add(connection)
                 val bytes = try {
@@ -56,7 +58,7 @@ internal class TvPosterLoader {
                 val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return@execute
                 if (!closed) {
                     cache.put(url, bitmap)
-                    main.post { if (!closed && view.tag == url) view.setImageBitmap(bitmap) }
+                    main.post { if (!closed && view.tag == url) { view.setImageBitmap(bitmap); onLoaded?.invoke() } }
                 }
             } catch (_: Exception) { /* 保留原生占位背景，片源封面失败不影响选片 */ }
         }

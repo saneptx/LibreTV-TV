@@ -10,7 +10,7 @@ const until=async(p)=>{let timer;try{return await Promise.race([p,new Promise((_
 function response(body){const r=Readable.from([Buffer.from(body)]);r.statusCode=200;r.headers={'content-length':Buffer.byteLength(body),'content-type':'application/octet-stream'};return {response:r};}
 async function fixture(t,{download,encode,prefetch=4,startupBufferSeconds=0,cleanup,input={},frames}={}){
  const root=await mkdtemp(join(tmpdir(),'libretv-pipeline-')),calls=[];
- const metadata={streams:[{codec_type:'video',width:1280,height:720,avg_frame_rate:'24/1',duration:'4',start_time:'0'},{codec_type:'audio',duration:'4',start_time:'0'}],format:{duration:'48'}};
+ const metadata={streams:[{codec_type:'video',codec_name:'h264',width:1280,height:720,avg_frame_rate:'24/1',duration:'4',start_time:'0'},{codec_type:'audio',duration:'4',start_time:'0'}],format:{duration:'48'}};
  const tools={ffmpeg:'ffmpeg-test',ffprobe:'ffprobe-test',env:{},engine:'libplacebo-vulkan',model:'fsrcnnx',modelSignature:'fixture',encoder:'h264_nvenc',chunkSeconds:4,targetHeight:720};
  const processor=createProcessor(tools,{cacheDir:root,prefetch,startupBufferSeconds,runner:async(executable,args,options)=>{
    if(executable===tools.ffprobe)return {stdout:JSON.stringify(metadata)};
@@ -66,7 +66,7 @@ test('抽帧识别出固定水印后，编码滤镜在缩放前加入 delogo，�
  await session.preparing;assert.equal(session.info.state,'ready');
  const regions=session.info.processingInfo.overlays;assert.equal(regions.length,1,JSON.stringify(regions));
  assert.equal(regions[0].kind,'logo');const r=regions[0];assert(r.x<=1080&&r.x+r.w>=1220&&r.y<=40&&r.y+r.h>=116&&r.w*r.h<=260*160,JSON.stringify(r));
- const vf=calls.find(c=>c.type==='encode').vf;assert.match(vf,/setpts=PTS-STARTPTS,delogo=x=\d+:y=\d+:w=\d+:h=\d+,(fps|format)=/);
+ const vf=calls.find(c=>c.type==='encode').vf;assert.match(vf,/setpts=PTS-STARTPTS[^,]*,delogo=x=\d+:y=\d+:w=\d+:h=\d+,(fps|format)=/);
  assert.match(session.label,/去水印 1 处/);
 });
 test('设备给的列表分片在电脑上被拒（按 IP 签名）时，改用电脑自己下载的列表重新准备',async t=>{

@@ -128,21 +128,100 @@ export function marqueeExtent(pair, w, h, region, width, height) {
   const sy = height / h, y = Math.max(1, Math.floor((top - 2) * sy));
   return { kind: 'marquee', x: region.x, y, w: region.w, h: Math.max(4, Math.min(Math.ceil((bottom - top + 4) * sy), height - y - 2)) };
 }
+/**
+ * 本段画面上方的静止横幅广告：只在一段时间内出现、位置不动的宽幅文字（全片抽样难以抽到）。
+ * frames 为本段内跨越约 7 秒的几帧灰度图。要求：画面整体在变化（排除静止镜头）、
+ * 文字在所有帧同一位置且亮度不变、横向铺开超过画面四分之一（排除地名等短字幕）。
+ * 只看画面上方 22%，对白字幕通常在下方。
+ */
+export function staticTextBands(frames, w, h) {
+  if (frames.length < 3) return [];
+  const first = frames[0], last = frames.at(-1);
+  let change = 0; for (let i = 0; i < first.length; i++) change += Math.abs(first[i] - last[i]);
+  if (change / first.length < 4) return [];
+  const grads = frames.map((f) => gradient(f, w, h)), zone = Math.round(h * .22), rows = [];
+  for (let y = 1; y < zone; y++) {
+    let count = 0, minX = w, maxX = 0, runs = 0, inside = false;
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const hit = grads.every((g) => g[i] > 24) && frames.every((f) => Math.abs(f[i] - first[i]) < 14);
+      if (hit) { count++; if (x < minX) minX = x; if (x > maxX) maxX = x; if (!inside) runs++; }
+      inside = hit;
+    }
+    // 文字行：静止边缘密集（≥ 行宽 15%）且横向铺开；整行都是边缘的直线不算
+    if (count >= w * .15 && count <= w * .8 && maxX - minX >= w * .25 && runs >= 3) rows.push(y);
+  }
+  const bands = [];
+  for (const y of rows) { const last = bands.at(-1); if (last && y <= last.y1 + 1) last.y1 = y; else bands.push({ y0: y, y1: y }); }
+  // 叠加文字是亮字配暗底，局部明暗差极大；月面、建筑等静止纹理是中间灰度（实测文字 35–53%，月面约 1%）
+  const contrast = (b) => {
+    let high = 0, n = 0;
+    for (let y = b.y0; y <= b.y1; y++) for (let x = 1; x < w - 1; x++) {
+      let max = 0, min = 255;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const v = first[Math.min(h - 1, Math.max(0, y + dy)) * w + x + dx]; if (v > max) max = v; if (v < min) min = v; }
+      n++; if (max - min >= 110) high++;
+    }
+    return high / n;
+  };
+  // 文字背后若是纯色（常见为画面上方黑边），返回该底色亮度，用底色填平比模糊更干净
+  const backdrop = (y0, y1) => {
+    const values = [];
+    for (let y = y0; y <= y1; y++) for (let x = 1; x < w - 1; x++) {
+      let max = 0, min = 255;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const v = first[Math.min(h - 1, Math.max(0, y + dy)) * w + x + dx]; if (v > max) max = v; if (v < min) min = v; }
+      if (max - min < 20) values.push(first[y * w + x]);
+    }
+    if (values.length < (y1 - y0 + 1) * (w - 2) * .4) return undefined;
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const sd = Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length);
+    return sd <= 8 ? Math.round(mean) : undefined;
+  };
+  // 黑边与画面的分界只占约 2 行，一行文字至少连续 4 行
+  return bands.filter((b) => b.y1 - b.y0 + 1 >= 4 && b.y1 - b.y0 + 1 <= h * .1 && contrast(b) >= .12)
+    .map((b) => {
+      const y = Math.max(0, b.y0 - 3), bh = Math.min(h - y, b.y1 - b.y0 + 7), fill = backdrop(y, y + bh - 1);
+      // 文字像素掩码（分析分辨率，膨胀 2 像素盖住笔画内部与描边）：只修补文字本身，周围画面保持原样
+      const mask = new Uint8Array(w * h);
+      for (let yy = y; yy < y + bh; yy++) for (let x = 1; x < w - 1; x++) {
+        const i = yy * w + x;
+        if (!(grads.every((g) => g[i] > 24) && frames.every((f) => Math.abs(f[i] - first[i]) < 14))) continue;
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const ty = yy + dy, tx = x + dx; if (ty >= y && ty < y + bh && tx >= 0 && tx < w) mask[ty * w + tx] = 255; }
+      }
+      return { kind: 'banner', x: 0, y, w, h: bh, mask, ...(fill === undefined ? {} : { fill }) };
+    });
+}
 /** 分析坐标 → 源视频像素，裁到 delogo 要求的画面内部 */
 export function toSource(regions, w, h, width, height) {
   const sx = width / w, sy = height / h;
   return regions.map((r) => {
     const x = Math.max(1, Math.floor(r.x * sx)), y = Math.max(1, Math.floor(r.y * sy));
-    return { kind: r.kind, x, y, w: Math.max(4, Math.min(Math.ceil(r.w * sx), width - x - 2)), h: Math.max(4, Math.min(Math.ceil(r.h * sy), height - y - 2)) };
+    return { kind: r.kind, x, y, w: Math.max(4, Math.min(Math.ceil(r.w * sx), width - x - 2)), h: Math.max(4, Math.min(Math.ceil(r.h * sy), height - y - 2)), ...(r.fill === undefined ? {} : { fill: r.fill }) };
   }).filter((r) => r.x + r.w < width - 1 && r.y + r.h < height - 1).slice(0, 8);
+}
+/** 把分析分辨率的文字掩码放大为源分辨率、只含横幅这一条（region 的 y/h，源像素）的 PGM 灰度图 */
+export function maskImage(mask, w, h, width, height, region = { y: 0, h: height }) {
+  const header = Buffer.from(`P5\n${width} ${region.h}\n255\n`), body = Buffer.alloc(width * region.h);
+  for (let y = 0; y < region.h; y++) {
+    const row = Math.min(h - 1, Math.floor((region.y + y) * h / height)) * w;
+    for (let x = 0; x < width; x++) body[y * width + x] = mask[row + Math.min(w - 1, Math.floor(x * w / width))];
+  }
+  return Buffer.concat([header, body]);
 }
 /** 台标用 delogo 按边框插值；整行的滚动字幕两端没有干净边框可插值，改为把该横条重度模糊后覆盖回去 */
 export function delogoFilter(regions) {
   const parts = [];
-  regions.filter((r) => r.kind !== 'marquee').forEach((r) => parts.push(`delogo=x=${r.x}:y=${r.y}:w=${r.w}:h=${r.h}`));
-  const logos = parts.join(','), bands = regions.filter((r) => r.kind === 'marquee');
+  const blurred = (r) => (r.kind === 'marquee' || r.kind === 'banner') && !r.maskFile;
+  regions.filter((r) => !blurred(r) && !r.maskFile).forEach((r) => parts.push(`delogo=x=${r.x}:y=${r.y}:w=${r.w}:h=${r.h}`));
+  // 有文字掩码的横幅：整条按上下边界插值（delogo），再只在文字像素（掩码，边缘柔化）处换成插值结果，周围画面保持原样
+  regions.filter((r) => r.maskFile).forEach((r, i) => parts.push(`split[tx${i}a][tx${i}b];[tx${i}b]delogo=x=1:y=${r.y}:w=${r.w - 2}:h=${r.h},crop=iw:${r.h}:0:${r.y}[tx${i}d];` +
+    `movie=${r.maskFile},format=gray,gblur=sigma=2[tx${i}m];[tx${i}d][tx${i}m]alphamerge[tx${i}t];[tx${i}a][tx${i}t]overlay=0:${r.y}:format=auto`));
+  const logos = parts.join(','), bands = regions.filter(blurred);
   if (!bands.length) return logos;
-  const chain = bands.map((r, i) => `split[ov${i}a][ov${i}b];[ov${i}b]crop=iw:${r.h}:0:${r.y},gblur=sigma=32:steps=3,eq=brightness=-0.1[ov${i}c];[ov${i}a][ov${i}c]overlay=0:${r.y}`).join(',');
+  // 纯色底：直接用底色填平，看不出处理痕迹。其余：模糊后叠回，上下 30% 渐变过渡，避免硬边色块
+  const chain = bands.map((r, i) => {
+    if (r.fill !== undefined) { const hex = r.fill.toString(16).padStart(2, '0'); return `drawbox=x=0:y=${r.y}:w=iw:h=${r.h}:color=0x${hex}${hex}${hex}@1:t=fill`; }
+    return `split[ov${i}a][ov${i}b];[ov${i}b]crop=iw:${r.h}:0:${r.y},gblur=sigma=28:steps=3,eq=brightness=-0.06,format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*clip(min(Y,H-1-Y)/(H*0.3),0,1)'[ov${i}c];[ov${i}a][ov${i}c]overlay=0:${r.y}:format=auto`;
+  }).join(',');
   return logos ? `${logos},${chain}` : chain;
 }
 export function detectOverlays(pairs, w, h, width, height) {

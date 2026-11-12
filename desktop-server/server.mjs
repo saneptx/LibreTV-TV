@@ -6,8 +6,9 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { processedPlaylist } from './processing.mjs';
+import { processedPlaylist, cleanPosition } from './processing.mjs';
 import { CompareJob } from './compare.mjs';
+import { createLibrary } from './library.mjs';
 
 const uid = () => randomBytes(16).toString('hex');
 const failure = (status, message) => Object.assign(new Error(message), { status });
@@ -39,7 +40,7 @@ export function rewritePlaylist(body, base, asset) {
   }).join('\n');
 }
 
-export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = false, idleMs = 30 * 60_000, lookupHost = lookup, processor = null } = {}) {
+export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = false, idleMs = 30 * 60_000, lookupHost = lookup, processor = null, libraryDir } = {}) {
   if (typeof token !== 'string' || token.length < 24 || token.length > 256) throw new Error('需要至少 24 字符的配对码');
   const secret = Buffer.from(`Bearer ${token}`), sessions = new Map(), comparisons = new Map(), compareResults = new Map();
   const stats = { created: 0, mediaRequests: 0, playlistRequests: 0, rangeRequests: 0, bytes: 0 };
@@ -93,7 +94,13 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
     try { return JSON.parse(body); } catch { throw failure(400, '请求格式无效'); }
   }
   const validPlaylists = (list) => list === undefined || Array.isArray(list) && list.length <= 3 && list.every((p) => p && typeof p.url === 'string' && /^https?:\/\//i.test(p.url) && p.url.length <= 4096 && typeof p.text === 'string' && p.text.startsWith('#EXTM3U') && p.text.length <= 2 * 1024 * 1024);
+  // 设备上报的硬件解码能力：{ hevc: { maxWidth, maxHeight, fps1080, fps2160 } }
+  const validDecoders = (value) => value === undefined || !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length <= 4
+    && Object.entries(value).every(([codec, d]) => ['hevc', 'av1', 'h264'].includes(codec) && d && typeof d === 'object' && ['maxWidth', 'maxHeight', 'fps1080', 'fps2160'].every((k) => d[k] === undefined || Number.isFinite(d[k]) && d[k] >= 0 && d[k] <= 8192));
   const validLines = (list) => list === undefined || Array.isArray(list) && list.length <= 400 && list.every((line) => typeof line === 'string' && line && line.length <= 2048 && !line.startsWith('#') && !/[\r\n]/.test(line));
+  // 电脑片库：后台下载整集处理结果；播放请求命中已完成的影片时直接读取
+  const library = processor ? createLibrary({ processor, dir: libraryDir, network: (job) => ({ open: (url, range, signal) => upstream(url, range ? { Range: `bytes=${range.start}-${range.end}` } : {}, 'GET', job, 0, signal) }) }) : null;
+  const libraryReady = library?.load().catch((error) => console.error('电脑片库载入失败：' + error.message));
   function closeComparison(job) { job.closed = true; job.task?.close(); for (const req of job.requests) req.destroy(); comparisons.delete(job.id); }
   function closeSession(session) {
     session.closed = true; session.pipeline?.close();
@@ -123,7 +130,25 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
       if (!authorized(req)) throw failure(401, '电脑服务配对码不匹配');
       const path = new URL(req.url, 'http://desktop.local').pathname;
       if (path === '/v1/status' && req.method === 'GET') {
-        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, deviceAdSegments: true, devicePlaylists: true, crossSourceCompare: true, overlayRemoval: true, superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
+        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, deviceAdSegments: true, devicePlaylists: true, crossSourceCompare: true, overlayRemoval: true, downloads: true, codecs: Object.keys(processor.tools.codecs || { h264: true }), superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
+      }
+      if (path === '/v1/downloads' && req.method === 'GET') {
+        if (!library) throw failure(501, '电脑下载需要电脑增强处理环境');
+        await libraryReady; send(res, 200, { items: library.list() }); return;
+      }
+      if (path === '/v1/downloads' && req.method === 'POST') {
+        if (!library) throw failure(501, '电脑下载需要电脑增强处理环境');
+        const input = await readJson(req);
+        if (!input || typeof input.url !== 'string' || input.url.length > 4096 || !validDecoders(input.decoders) || ['superResolution', 'adFilter', 'overlayRemoval'].some((k) => input[k] !== undefined && typeof input[k] !== 'boolean')
+          || input.title !== undefined && typeof input.title !== 'string' || input.meta !== undefined && (typeof input.meta !== 'object' || JSON.stringify(input.meta).length > 4096)) throw failure(400, '下载参数无效');
+        await destination(input.url); await libraryReady;
+        const { title, subtitle, meta, ...processing } = input;
+        send(res, 201, await library.add({ url: processing.url, superResolution: processing.superResolution, adFilter: processing.adFilter, overlayRemoval: processing.overlayRemoval, decoders: processing.decoders }, { title, subtitle, meta })); return;
+      }
+      const downloadMatch = path.match(/^\/v1\/downloads\/([a-f0-9]{32})$/);
+      if (downloadMatch && req.method === 'DELETE') {
+        if (!library) throw failure(501, '电脑下载需要电脑增强处理环境');
+        await libraryReady; if (!(await library.remove(downloadMatch[1]))) throw failure(404, '下载不存在'); send(res, 200, { removed: true }); return;
       }
       if (path === '/v1/compare' && req.method === 'POST') {
         if (!processor) throw failure(501, '多来源比对需要电脑增强处理环境');
@@ -155,7 +180,7 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
         for await (const chunk of req) { body += chunk; if (body.length > 3 * 1024 * 1024) throw failure(413, '请求过大'); }
         let input; try { input = JSON.parse(body); } catch { throw failure(400, '请求格式无效'); }
         if (!input || typeof input.url !== 'string' || input.superResolution !== undefined && typeof input.superResolution !== 'boolean' || input.position !== undefined && (!Number.isFinite(input.position) || input.position < 0)
-          || !validPlaylists(input.playlists) || !validLines(input.adSegments) || input.overlayRemoval !== undefined && typeof input.overlayRemoval !== 'boolean') throw failure(400, '播放参数无效');
+          || !validPlaylists(input.playlists) || !validLines(input.adSegments) || !validDecoders(input.decoders) || input.overlayRemoval !== undefined && typeof input.overlayRemoval !== 'boolean') throw failure(400, '播放参数无效');
         await destination(input.url);
         if (sessions.size >= 8) throw failure(429, '电脑服务的播放任务已满');
         const headers = {};
@@ -164,7 +189,15 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
         }
         const session = { id: uid(), assets: new Map(), byUrl: new Map(), requests: new Set(), headers, touched: Date.now(), closed: false };
         let mediaPath;
-        if (processor) {
+        await libraryReady;
+        const saved = library?.find(input);
+        if (saved) {
+          // 片库命中：直接读取已处理好的整集，时间轴与处理结果沿用下载时的记录
+          session.library = saved;
+          session.status = { state: 'ready', processing: 'enhance', position: Math.max(0, cleanPosition(Number(input.position) || 0, saved.timeMap || [])), timeMap: saved.timeMap || [],
+            label: '电脑片库 · ' + (saved.label || '已下载'), processingInfo: saved.processingInfo, output: saved.output, input: saved.sourceInfo, message: '已从电脑片库读取' };
+          mediaPath = `/v1/sessions/${session.id}/processed/index.m3u8`;
+        } else if (processor) {
           session.pipeline = processor.create(session, input, { open: (url, range, signal) => upstream(url, { ...headers, ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) }, 'GET', session, 0, signal) });
           mediaPath = `/v1/sessions/${session.id}/processed/index.m3u8`;
         } else mediaPath = addAsset(session, input.url);
@@ -175,23 +208,25 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
       const session = match && sessions.get(match[1]);
       if (!session) throw failure(404, '播放任务不存在或已过期，请重试');
       session.touched = Date.now();
-      if (!match[2] && !match[3] && req.method === 'GET') { send(res, 200, session.pipeline ? session.pipeline.status() : { state: 'ready', processing: 'relay', label: '电脑串流 · 原画转发' }); return; }
+      if (!match[2] && !match[3] && req.method === 'GET') { send(res, 200, session.status || (session.pipeline ? session.pipeline.status() : { state: 'ready', processing: 'relay', label: '电脑串流 · 原画转发' })); return; }
       if (!match[2] && !match[3] && req.method === 'DELETE') { closeSession(session); send(res, 200, { closed: true }); return; }
-      if (match[3] && session.pipeline && ['GET','HEAD'].includes(req.method)) {
-        const job = session.pipeline;
-        await job.preparing;
-        if (job.info.state === 'error') throw failure(502, job.info.error);
+      if (match[3] && (session.pipeline || session.library) && ['GET','HEAD'].includes(req.method)) {
+        const job = session.library ? { duration: session.library.duration, chunkDuration: session.library.chunkDuration, continuous: session.library.timeline === 'continuous', serve: async (n) => {
+          if (!Number.isInteger(n) || n < 0 || n >= session.library.segments) throw failure(404, '视频分段不存在');
+          return library.file(session.library, n);
+        } } : session.pipeline;
+        if (!session.library) { await job.preparing; if (job.info.state === 'error') throw failure(502, job.info.error); }
         if (session.closed) throw failure(410, '播放任务已关闭');
         res.setHeader('Cache-Control','no-store');
         if (match[3] === 'index.m3u8') {
-          const body = processedPlaylist(job.duration, job.chunkDuration, `/v1/sessions/${session.id}/processed`);
+          const body = processedPlaylist(job.duration, job.chunkDuration, `/v1/sessions/${session.id}/processed`, session.library ? job.continuous : true);
           res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Content-Length': Buffer.byteLength(body) });
           stats.playlistRequests++; stats.mediaRequests++;
           res.end(req.method === 'HEAD' ? undefined : body); return;
         }
         const index = Number(match[3].slice(0,-3));
         const file = await job.serve(index), size = (await stat(file)).size;
-        const unpin = processor.budget.pin(file);
+        const unpin = session.library ? () => {} : processor.budget.pin(file);
         try {
           let start = 0, end = size - 1;
           if (req.headers.range) {
@@ -247,6 +282,6 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
   server.requestTimeout = 30_000; server.headersTimeout = 15_000;
   const cleanup = setInterval(() => { for (const job of comparisons.values()) if (Date.now() - job.touched > Math.min(idleMs, 10 * 60_000)) closeComparison(job); for (const session of sessions.values()) if (Date.now() - session.touched > (session.pipeline?.info.state === 'preparing' ? Math.min(idleMs,30_000) : idleMs)) closeSession(session); }, Math.min(idleMs, 10_000));
   cleanup.unref();
-  server.on('close', () => { clearInterval(cleanup); for (const job of comparisons.values()) closeComparison(job); for (const session of sessions.values()) closeSession(session); });
+  server.on('close', () => { clearInterval(cleanup); library?.close(); for (const job of comparisons.values()) closeComparison(job); for (const session of sessions.values()) closeSession(session); });
   return { server, closeSessions: () => { for (const session of sessions.values()) closeSession(session); } };
 }

@@ -38,6 +38,7 @@ import androidx.media3.exoplayer.hls.playlist.HlsMultivariantPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParserFactory
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.ParsingLoadable
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -58,6 +59,9 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     private var request = JSONObject()
     private var adFilter = true
     private var proxy = false
+    private var currentUrl = ""
+    /** 电脑串流出错后自动从当前位置重新打开的次数与时间（2 分钟内最多 3 次） */
+    private val recoveries = ArrayDeque<Long>()
     private var rendered = false
     private var errorText = ""
     private var fit = "contain"
@@ -114,7 +118,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             if (fallback.isNotEmpty()) require(sameOrigin(http(fallback)) && http(fallback).path?.startsWith("/api/proxy") == true)
             stop()
             id = session; request = next; adFilter = next.optBoolean("adFilter", true)
-            meter = ByteMeter(); proxy = false; rendered = false; errorText = ""; videoDecoder = ""
+            meter = ByteMeter(); proxy = false; rendered = false; errorText = ""; videoDecoder = ""; recoveries.clear()
             adSegments = next.optJSONArray("adSegments")?.let { list -> (0 until minOf(list.length(), 400)).map { list.optString(it).trim() }.filter { it.isNotEmpty() && !it.startsWith('#') }.toSet() } ?: emptySet()
             playlists = next.optJSONArray("playlists")?.let { list -> (0 until minOf(list.length(), 3)).mapNotNull { list.optJSONObject(it) }
                 .filter { it.optString("text").startsWith("#EXTM3U") && it.optString("url").startsWith("http") }.associate { it.getString("url") to it.getString("text") } } ?: emptyMap()
@@ -155,9 +159,16 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
                     if (player !== exo) return
                     Log.w(TAG, "Playback failed: ${error.errorCodeName}", error)
                     val fallbackUrl = request.optString("proxyUrl")
+                    val now = SystemClock.elapsedRealtime()
+                    while (recoveries.isNotEmpty() && now - recoveries.first() > 120_000) recoveries.removeFirst()
                     if (!proxy && fallbackUrl.isNotEmpty() && error.errorCode in 2000..2999) {
                         proxy = true
                         prepare(fallbackUrl, exo.currentPosition.coerceAtLeast(0), exo.playWhenReady)
+                    } else if (request.optString("processing") == "enhance" && recoveries.size < 3 && error.errorCode in 2000..3999) {
+                        // 电脑串流的单个分段偶发失败（片源断线、编码超时）：静默从当前位置重新打开，不打断观看
+                        recoveries.addLast(now)
+                        val position = exo.currentPosition.coerceAtLeast(0); val playing = exo.playWhenReady
+                        handler.postDelayed({ if (player === exo) prepare(currentUrl, position, playing) }, 1500)
                     } else {
                         errorText = "无法播放此片源，请尝试换源"
                         emit()
@@ -206,7 +217,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
 
     private fun prepare(url: String, position: Long, autoplay: Boolean) {
         val exo = player ?: return
-        errorText = ""; rendered = false
+        errorText = ""; rendered = false; currentUrl = url
         val token = CookieManager.getInstance().getCookie(origin).orEmpty()
         val rawHeaders = request.optJSONObject("headers") ?: JSONObject()
         val headers = rawHeaders.keys().asSequence().filter { !it.equals("cookie", true) && !it.equals("host", true) }
@@ -227,7 +238,9 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             item.setMimeType(MimeTypes.APPLICATION_M3U8)
             val token = ++generation
             val parsers = FilterParserFactory(adFilter, adSegments, playlists) { removals -> handler.post { if (token == generation && player === exo) applyTimeMap(removals) } }
-            HlsMediaSource.Factory(resolving).setPlaylistParserFactory(parsers).createMediaSource(item.build())
+            // 电脑串流的分段是现场处理的，偶尔慢或失败：多给几次重试再判定为播放错误
+            val retries = if (request.optString("processing") == "enhance") 8 else DefaultLoadErrorHandlingPolicy.DEFAULT_MIN_LOADABLE_RETRY_COUNT
+            HlsMediaSource.Factory(resolving).setPlaylistParserFactory(parsers).setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(retries)).createMediaSource(item.build())
         } else DefaultMediaSourceFactory(resolving).createMediaSource(item.build())
         exo.setMediaSource(mediaSource, position.coerceAtLeast(0))
         exo.prepare(); exo.playWhenReady = autoplay

@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
 
@@ -19,15 +18,15 @@ internal class TvTimeline(context: Context, private val ui: TvWidgets) : View(co
         contentDescription="播放进度，左右键调整，确认键跳转"
     }
     override fun onDraw(canvas: Canvas) {
-        val cy=height/2f; val half=ui.px(3)/2f
-        paint.color=Color.argb(56,255,255,255); canvas.drawRoundRect(0f,cy-half,width.toFloat(),cy+half,half,half,paint)
-        paint.color=Color.argb(53,255,255,255); canvas.drawRect(0f,cy-half,width*buffered,cy+half,paint)
-        paint.color=Color.rgb(70,219,237); canvas.drawRect(0f,cy-half,width*fraction,cy+half,paint)
-        paint.color=Color.WHITE; canvas.drawCircle(width*fraction,cy,ui.px(4).toFloat(),paint)
+        // 白色细进度条：焦点时加粗并显示拖动点
+        val cy=height/2f; val half=ui.px(if (hasFocus()) 6 else 4)/2f
+        paint.color=Color.argb(64,255,255,255); canvas.drawRoundRect(0f,cy-half,width.toFloat(),cy+half,half,half,paint)
+        paint.color=Color.argb(90,255,255,255); canvas.drawRoundRect(0f,cy-half,width*buffered,cy+half,half,half,paint)
+        paint.color=Color.WHITE; canvas.drawRoundRect(0f,cy-half,width*fraction,cy+half,half,half,paint)
         if (hasFocus()) {
-            paint.color=ui.cyan; paint.style=Paint.Style.STROKE; paint.strokeWidth=ui.px(2).toFloat()
-            canvas.drawRoundRect(RectF(2f,2f,width-2f,height-2f),ui.px(5).toFloat(),ui.px(5).toFloat(),paint)
-            paint.style=Paint.Style.FILL
+            // 拖动点：一圈淡淡的光晕 + 白色圆点
+            paint.color=Color.argb(56,255,255,255); canvas.drawCircle(width*fraction,cy,ui.px(9).toFloat(),paint)
+            paint.color=ui.lamp; canvas.drawCircle(width*fraction,cy,ui.px(5).toFloat(),paint)
         }
     }
     override fun onFocusChanged(gain: Boolean,direction: Int,previous: android.graphics.Rect?) { super.onFocusChanged(gain,direction,previous); invalidate() }

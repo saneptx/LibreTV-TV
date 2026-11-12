@@ -22,6 +22,7 @@ internal class TvFocusDecoration(private val root: ViewGroup, private val scale:
     private val focusRect=RectF()
     private val focusClip=RectF()
     private var style: Style?=null
+    private var strength=1f
     private var tree: ViewTreeObserver?=null
     private val focusListener=ViewTreeObserver.OnGlobalFocusChangeListener { _,_ -> update() }
     private val drawListener=ViewTreeObserver.OnPreDrawListener { update(); true }
@@ -56,6 +57,10 @@ internal class TvFocusDecoration(private val root: ViewGroup, private val scale:
                 parent=parent.parent
             }
         }
+        // 光晕跟随控件自身和各级父容器的透明度，浮层淡入淡出时不会抢先出现
+        var opacity=1f
+        if(next!=null) { var node: View?=focused; while(node!=null && node!==root) { opacity*=node.alpha; node=node.parent as? View } }
+        if(strength!=opacity) { strength=opacity; invalidateSelf() }
         if(style!=next || focusRect!=rect || focusClip!=clip || bounds.width()!=root.width || bounds.height()!=root.height) {
             style=next; focusRect.set(rect); focusClip.set(clip); setBounds(0,0,root.width,root.height); invalidateSelf()
         }
@@ -68,15 +73,17 @@ internal class TvFocusDecoration(private val root: ViewGroup, private val scale:
         for(step in 14 downTo 1) {
             val expansion=(step+4)*scale
             val glow=RectF(focusRect).apply { inset(-expansion,-expansion) }
-            paint.color=Color.rgb(53,217,255)
-            paint.alpha=((if(active.home) 24 else 16)*exp(-step*step/80.0)).toInt()
+            paint.color=Color.WHITE
+            paint.alpha=((if(active.home) 30 else 14)*strength*exp(-step*step/80.0)).toInt()
             paint.strokeWidth=1.2f*scale
             canvas.drawRoundRect(glow,radius+expansion,radius+expansion,paint)
         }
         val expansion=(if(active.home) 2.5f else 3f)*scale
         val outline=RectF(focusRect).apply { inset(-expansion,-expansion) }
-        paint.color=if(active.home) Color.argb(77,53,217,255) else Color.rgb(98,228,255)
-        paint.strokeWidth=(if(active.home) 5f else 2f)*scale
+        // 胶囊按钮焦点已是白底，不再描边；卡片保留一圈很淡的白边
+        if(!active.home) { canvas.restoreToCount(save); return }
+        paint.color=Color.argb((40*strength).toInt(),255,255,255)
+        paint.strokeWidth=3f*scale
         canvas.drawRoundRect(outline,radius+expansion,radius+expansion,paint)
         canvas.restoreToCount(save)
     }

@@ -5,8 +5,17 @@
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowNoTitle">true</item>
-        <item name="android:colorAccent">#35D9FF</item>
-        <item name="android:navigationBarColor">#07101D</item>
-        <item name="android:windowBackground">#07101D</item>
+        <item name="android:colorAccent">#FFFFFF</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowBackground">#000000</item>
+    </style>
+    <!-- 面板进出场：居中面板从略大处收拢并淡入；底部抽屉自下滑入 -->
+    <style name="Motion.Lumen.Dialog" parent="">
+        <item name="android:windowEnterAnimation">@anim/lumen_dialog_in</item>
+        <item name="android:windowExitAnimation">@anim/lumen_dialog_out</item>
+    </style>
+    <style name="Motion.Lumen.Sheet" parent="">
+        <item name="android:windowEnterAnimation">@anim/lumen_sheet_in</item>
+        <item name="android:windowExitAnimation">@anim/lumen_sheet_out</item>
     </style>
 </resources>

@@ -7,7 +7,7 @@ import { aggregateResults } from './result-groups';
 import { qualityKey, qualityLabel, isQualityEntryFresh } from './quality';
 import { flushPendingPersist } from './persist-storage';
 import { syncSourceSubscription } from './subscription-sync';
-import { closeDesktopSession, compareOnDesktop, resolvePlaybackDelivery, testDesktopConnection, sourcePosition, sourceDuration, type RemovedInterval, type DesktopSession } from './desktop-playback';
+import { addDesktopDownload, closeDesktopSession, compareOnDesktop, listDesktopDownloads, removeDesktopDownload, resolvePlaybackDelivery, sanitizeDecoders, testDesktopConnection, sourcePosition, sourceDuration, type RemovedInterval, type DesktopSession } from './desktop-playback';
 import { analyzePlaylist, clearLearnedAds, decideAds, learnAdAt, loadLearnedAds, saveLearnedAd, type AdTransport, type MediaAnalysis } from './ad-analysis';
 import { decodeNativeBytes, encodeNativeBytes, nativeFetch, nativeRpc } from './native-http';
 import type { SearchResultItem, SourceConfig } from './types';
@@ -24,23 +24,26 @@ const adTransport: AdTransport = {
     const res = await nativeFetch(url, { signal, timeoutMs: 5000 });
     return res.ok ? { text: await res.text(), url: res.url || url } : undefined;
   },
-  fetchPrefix: async (url, maxBytes, signal) => {
-    const res = await nativeFetch(url, { signal, timeoutMs: 4000, maxBytes, prefix: true });
-    return res.ok ? new Uint8Array(await res.arrayBuffer()) : undefined;
+  fetchPrefix: async (url, maxBytes, signal, range) => {
+    const res = await nativeFetch(url, { signal, timeoutMs: 4000, maxBytes, prefix: true, headers: range ? { Range: `bytes=0-${maxBytes - 1}` } : undefined });
+    // 不支持 Range 的服务器会返回整个文件（200），前缀读取照样截断
+    return res.ok ? new Uint8Array(await res.arrayBuffer()).subarray(0, maxBytes) : undefined;
   },
   decrypt: async (body, key, iv) => decodeNativeBytes((await nativeRpc('decrypt', { body: encodeNativeBytes(body), key: encodeNativeBytes(key), iv: encodeNativeBytes(iv) })).body),
 };
 /** 当前及最近播放的段组指纹；标记广告和重新打开时不必再联网建指纹 */
 const adAnalyses = new Map<string, { media: MediaAnalysis[]; at: number }>();
 async function analyzeAds(url: string, signal: AbortSignal): Promise<MediaAnalysis[]> {
-  const cached = adAnalyses.get(url);
+  // 电脑串流时插播广告的时间轴检测交给电脑（网络快得多），设备只做编码比对和学习库
+  const timeline = useAppStore.getState().playbackMode !== 'desktop', key = `${timeline ? 'timeline' : 'codec'}|${url}`;
+  const cached = adAnalyses.get(key);
   // 列表里的签名地址和插入的广告都会变，缓存只覆盖本次观看（含标记后重开）
   if (cached && Date.now() - cached.at < 10 * 60_000) return cached.media;
-  const media = await analyzePlaylist(url, adTransport, signal);
+  const media = await analyzePlaylist(url, adTransport, signal, 5000, { timeline });
   if (signal.aborted) return media;
-  adAnalyses.delete(url);
+  adAnalyses.delete(key);
   if (adAnalyses.size >= 20) adAnalyses.delete(adAnalyses.keys().next().value!);
-  adAnalyses.set(url, { media, at: Date.now() });
+  adAnalyses.set(key, { media, at: Date.now() });
   return media;
 }
 /** 交给 Media3 的分析原文；总量受原生消息上限约束，超出时让播放器自行下载 */
@@ -239,9 +242,11 @@ export function installNativeTvBackend(): () => void {
           const analyzed = adFilter ? await analyzeAds(detail.episodes[index], signal) : [];
           const ads = adFilter ? decideAds(analyzed, loadLearnedAds()) : undefined;
           if (signal.aborted) break;
-          const resolved = await resolvePlaybackDelivery(detail.episodes[index], useAppStore.getState(), signal, { position, adFilter,
-            adSegments: ads ? boundedLines([...ads.extraLines, ...ads.heuristicLines]) : undefined, playlists: analyzedPlaylists(analyzed), onProgress: (value) => progress('processing-progress', value) });
-          const playback = ads ? { ...resolved, adSegments: boundedLines(ads.extraLines), playlists: resolved.delivery === 'direct' ? analyzedPlaylists(analyzed) : [], adSummary: { codecGroups: ads.codecGroups, learnedGroups: ads.learnedGroups, repeatGroups: ads.repeatGroups } } : resolved;
+          // 电脑片库里的影片在直连模式下也走电脑，直接读取已处理好的整集
+          const settings = args.fromLibrary === true ? { ...useAppStore.getState(), playbackMode: 'desktop' as const } : useAppStore.getState();
+          const resolved = await resolvePlaybackDelivery(detail.episodes[index], settings, signal, { position, adFilter,
+            adSegments: ads ? boundedLines([...ads.extraLines, ...ads.heuristicLines]) : undefined, playlists: analyzedPlaylists(analyzed), decoders: sanitizeDecoders(args.decoders), onProgress: (value) => progress('processing-progress', value) });
+          const playback = ads ? { ...resolved, adSegments: boundedLines(ads.extraLines), playlists: resolved.delivery === 'direct' ? analyzedPlaylists(analyzed) : [], adSummary: { codecGroups: ads.codecGroups, learnedGroups: ads.learnedGroups, repeatGroups: ads.repeatGroups, timelineGroups: ads.timelineGroups } } : resolved;
           const playbackPosition = playback.position ?? position;
           if (signal.aborted) { void closeDesktopSession(playback.desktopSession); break; }
           try {
@@ -324,6 +329,33 @@ export function installNativeTvBackend(): () => void {
           break;
         }
         case 'clear-learned-ads': clearLearnedAds(); value = config(); break;
+        case 'desktop-downloads': {
+          const store = useAppStore.getState();
+          if (!store.desktopServerUrl || !store.desktopPairingToken) { value = { available: false, items: [] }; break; }
+          value = { available: true, items: await listDesktopDownloads({ desktopServerUrl: store.desktopServerUrl, desktopPairingToken: store.desktopPairingToken }, signal) };
+          break;
+        }
+        case 'download-desktop': {
+          // 电脑后台按当前处理设置把整集处理好保存到电脑片库
+          const store = useAppStore.getState();
+          if (!store.desktopServerUrl || !store.desktopPairingToken) throw new Error('请先在片源管理中填写电脑地址和配对码');
+          const item = args.item as unknown as SearchResultItem, source = sourceFor(item);
+          const detail = await standaloneDetail(item.vodId, source, signal);
+          const index = Math.min(Math.max(0, Number(args.index) || 0), detail.episodes.length - 1);
+          const episode = detail.episodes.length > 1 ? `第 ${index + 1} 集` : '电影';
+          value = await addDesktopDownload({ desktopServerUrl: store.desktopServerUrl, desktopPairingToken: store.desktopPairingToken }, {
+            url: detail.episodes[index], superResolution: store.superResolution !== false, adFilter: store.adFilter, overlayRemoval: store.overlayRemoval !== false,
+            decoders: sanitizeDecoders(args.decoders), title: item.name, subtitle: `${episode} · ${item.sourceName || source.name}`,
+            meta: { sourceKey: item.sourceKey, sourceName: item.sourceName || source.name, sourceUrl: item.sourceUrl, vodId: item.vodId, index, name: item.name, pic: item.pic || detail.videoInfo.cover },
+          }, signal);
+          break;
+        }
+        case 'delete-download': {
+          const store = useAppStore.getState();
+          await removeDesktopDownload({ desktopServerUrl: store.desktopServerUrl || '', desktopPairingToken: store.desktopPairingToken || '' }, String(args.id));
+          value = { removed: true };
+          break;
+        }
         case 'prefetch-bitrates': {
           // 遥控器停在影片卡片上时预先探测各来源码率，按确认键时多半已有结果
           for (const item of (Array.isArray(args.items) ? args.items as unknown as SearchResultItem[] : []).slice(0, 12)) void probeShared(item).catch(() => undefined);

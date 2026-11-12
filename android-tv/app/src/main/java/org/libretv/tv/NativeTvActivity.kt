@@ -55,8 +55,11 @@ class NativeTvActivity : Activity() {
         }
         player.container.addView(web, FrameLayout.LayoutParams(1, 1))
         player.container.addView(screen.view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // 片头黑幕盖在界面层之上（界面层的焦点光晕画在它自己的 overlay 里，不能透出来）
+        player.container.addView(screen.curtain, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(player.container)
         web.loadUrl("$origin/native-tv")
+        if (BuildConfig.DEBUG) android.util.Log.i("LibreTV", "hardware decoders ${DecoderCapabilities.json}")
     }
     private fun hideBars() {
         @Suppress("DEPRECATION")

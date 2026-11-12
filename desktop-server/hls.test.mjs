@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMaster, parseMedia, sliceMedia, targetSize, repeatedInsertLines } from './hls.mjs';
+import { parseMaster, parseMedia, sliceMedia, targetSize, repeatedInsertLines, firstPts, timelineGroups, timelineInsertLines, probeTimeline } from './hls.mjs';
 import { compactRemovals, cleanPosition, processedPlaylist, readPlaylist } from './processing.mjs';
 import { Readable } from 'node:stream';
 const list=(lines)=>'#EXTM3U\n#EXT-X-TARGETDURATION:4\n'+lines.join('\n')+'\n#EXT-X-ENDLIST\n';
@@ -70,4 +70,51 @@ test('电脑端重复插入规则：同一非正片目录、时长相同的短�
  assert.deepEqual(repeatedInsertLines(body,'https://v.test/a.m3u8'),['https://ads.test/x/1a.ts','https://ads.test/x/1b.ts','https://ads.test/x/2a.ts','https://ads.test/x/2b.ts']);
  assert(Math.abs(parseMedia(body,'https://v.test/a.m3u8',{repeatFilter:true}).removedSeconds-35.2)<1e-6);
  assert.deepEqual(repeatedInsertLines(list([film(30,0),ad(1),film(30,30)]),'https://v.test/a.m3u8'),[]);
+});
+
+// —— 时间轴接续（插播广告与正片编码相同，只能靠时间戳识别）——
+function tsWithPts(seconds) {
+  const packet = (pid, payload, start = true) => { const p = Buffer.alloc(188, 0xff); p[0] = 0x47; p[1] = (start ? 0x40 : 0) | (pid >> 8); p[2] = pid & 0xff; p[3] = 0x10; Buffer.from(payload).copy(p, 4); return p; };
+  const pat = [0, 0x00, 0xb0, 0x0d, 0, 1, 0xc1, 0, 0, 0, 1, 0xf0, 0x00, 0, 0, 0, 0];
+  const pmt = [0, 0x02, 0xb0, 0x12, 0, 1, 0xc1, 0, 0, 0xe1, 0x00, 0xf0, 0x00, 0x1b, 0xe1, 0x00, 0xf0, 0x00, 0, 0, 0, 0];
+  const pts = Math.round(seconds * 90000);
+  const pes = [0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5, 0x21 | (Math.floor(pts / 2 ** 29) & 0x0e), Math.floor(pts / 2 ** 22) & 0xff, (Math.floor(pts / 2 ** 14) & 0xfe) | 1, Math.floor(pts / 2 ** 7) & 0xff, ((pts * 2) & 0xfe) | 1];
+  return Buffer.concat([packet(0, pat), packet(0x1000, pmt), packet(0x100, pes)]);
+}
+test('读取 TS 分片第一个视频 PES 的时间戳，超过 32 位也能还原', () => {
+  assert.ok(Math.abs(firstPts(tsWithPts(363.41)) - 363.41) < 1e-4);
+  assert.ok(Math.abs(firstPts(tsWithPts(60000)) - 60000) < 1e-4);
+  assert.equal(firstPts(Buffer.alloc(600, 0x5a)), undefined);
+});
+const timelinePlaylist = (count, adAt, adSeconds) => {
+  const lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:2'];
+  for (let k = 0; k < count; k++) { if (k) lines.push('#EXT-X-DISCONTINUITY'); const n = k === adAt ? adSeconds / 2 : 2; for (let i = 0; i < n; i++) lines.push('#EXTINF:2,', `g${k}/${i}.ts`); }
+  return lines.join('\n') + '\n#EXT-X-ENDLIST';
+};
+const timestamps = (groups, adAt, adSeconds, resume = true) => new Map(groups.map((g, k) => [g.url, k === adAt ? 1.4 : g.start + 1.4 - (k > adAt ? (resume ? adSeconds : -500) : 0)]));
+test('插入段自带时间戳、之后正片接回插入前位置 → 删除；没接回不删', async () => {
+  const groups = timelineGroups(timelinePlaylist(300, 180, 24), 'https://cdn.test/v/index.m3u8');
+  const pts = timestamps(groups, 180, 24);
+  const reads = await probeTimeline(groups, async (g) => pts.get(g.url));
+  assert.deepEqual(timelineInsertLines(groups), Array.from({ length: 12 }, (_, i) => `g180/${i}.ts`));
+  assert.ok(reads < 60, `只读插入点附近：${reads}`);
+  const other = timelineGroups(timelinePlaylist(300, 180, 24), 'https://cdn.test/v/index.m3u8');
+  const shifted = timestamps(other, 180, 24, false);
+  await probeTimeline(other, async (g) => shifted.get(g.url));
+  assert.deepEqual(timelineInsertLines(other), []);
+});
+test('开头插播与「正片开头一段 + 插入」只看时间戳无法区分 → 不删，绝不能删掉正片', async () => {
+  for (const at of [0, 5]) {
+    const groups = timelineGroups(timelinePlaylist(300, at, 30), 'https://cdn.test/v/index.m3u8');
+    const pts = timestamps(groups, at, 30);
+    await probeTimeline(groups, async (g) => pts.get(g.url));
+    assert.deepEqual(timelineInsertLines(groups), [], `插在第 ${at * 4} 秒`);
+  }
+});
+test('加密或 fMP4 列表不做时间轴检测；超过 90 秒的插入不删', async () => {
+  assert.deepEqual(timelineGroups('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k"\n' + timelinePlaylist(5, 2, 4).slice(8), 'https://cdn.test/'), []);
+  const groups = timelineGroups(timelinePlaylist(300, 180, 100), 'https://cdn.test/v/index.m3u8');
+  const pts = timestamps(groups, 180, 100);
+  await probeTimeline(groups, async (g) => pts.get(g.url));
+  assert.deepEqual(timelineInsertLines(groups), []);
 });

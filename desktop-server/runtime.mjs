@@ -72,6 +72,10 @@ export async function toolConfig(options = {}) {
   await run(ffprobe, ['-version'], { env });
   await run(ffmpeg, ['-hide_banner','-loglevel','error','-f','lavfi','-i','color=s=320x180:r=24','-frames:v','1','-c:v',config.encoder,'-f','null','-'], { env, timeout: 15_000 });
   if(fast) await run(ffmpeg,['-hide_banner','-loglevel','error',...vulkanDevice(config),'-f','lavfi','-i','testsrc2=s=320x180:r=24','-frames:v','2','-vf',vulkanFilter(config,{width:320,height:180},{width:640,height:360}),'-f','null','-'],{env,timeout:30_000});
+  // 实际试编码确认本机可用的 HEVC 编码器；设备能硬解时优先使用，同画质码率更低
+  config.codecs = { h264: config.encoder };
+  const hevc = config.encoder === 'h264_nvenc' ? 'hevc_nvenc' : 'libx265';
+  if (options.hevc !== false) try { await run(ffmpeg, ['-hide_banner','-loglevel','error','-f','lavfi','-i','color=s=1280x720:r=24','-frames:v','2','-c:v',hevc,'-f','null','-'], { env, timeout: 15_000 }); config.codecs.hevc = hevc; } catch { /* 不支持时只用 H.264 */ }
   return config;
 }
 export function vulkanDevice(tools) { return ['-init_hw_device',`vulkan=vk:${tools.gpu}`,'-filter_hw_device','vk']; }
@@ -93,18 +97,34 @@ export function vulkanFilter(tools, source, target, frameRate) {
   if (forceTwo) filters.push(`libplacebo=w=${target.width}:h=${target.height}:format=yuv420p`);
   return filters.concat('hwdownload','format=yuv420p','setsar=1').join(',');
 }
-export function encodingProfile(size, fps) {
+/** 同画质下各编码的码率系数（相对 H.264） */
+const CODEC_BITRATE = { h264: 1, hevc: .6 };
+/**
+ * 按设备上报的硬件解码能力选择输出编码。decoders 形如 { hevc: { maxWidth, maxHeight, fps1080, fps2160 } }；
+ * 未上报（旧版 APK、浏览器）时一律 H.264。AV1 需要 fMP4 分片，当前 TS 输出不使用。
+ */
+export function chooseCodec(tools, decoders, size, fps) {
+  for (const codec of ['hevc']) {
+    const encoder = tools.codecs?.[codec], d = decoders?.[codec];
+    if (!encoder || !d) continue;
+    const maxFps = size.height > 1088 || size.width > 1920 ? d.fps2160 : d.fps1080;
+    if (size.width <= d.maxWidth && size.height <= d.maxHeight && fps <= (maxFps || 0) + .5) return { codec, encoder };
+  }
+  return { codec: 'h264', encoder: tools.codecs?.h264 || tools.encoder };
+}
+export function encodingProfile(size, fps, codec = 'h264') {
   const tier = Math.max(size.height, size.width * 9 / 16);
   // Even-pixel aspect rounding (854x480, for example) must not move a source up a bitrate tier.
   const [average, peak] = tier > 1080*1.01 ? [12,20] : tier > 720*1.01 ? [5,8] : tier > 480*1.01 ? [3,5] : [1.5,3];
-  const factor = Math.min(1.5, Math.max(1, fps/30));
+  const factor = Math.min(1.5, Math.max(1, fps/30)) * (CODEC_BITRATE[codec] || 1);
   return { average:Math.round(average*factor*1_000_000), peak:Math.round(peak*factor*1_000_000), buffer:Math.round(peak*factor*1_000_000) };
 }
 export function videoEncoderOptions(encoder, profile) {
   const limits = ['-maxrate',String(profile.peak),'-bufsize',String(profile.buffer)];
-  return encoder === 'h264_nvenc'
-    ? ['-preset','p4','-rc','vbr','-cq','20','-b:v',String(profile.average),...limits,'-rc-lookahead','0','-zerolatency','1']
-    : ['-preset','veryfast','-crf','20',...limits];
+  if (encoder === 'h264_nvenc') return ['-preset','p4','-rc','vbr','-cq','20','-b:v',String(profile.average),...limits,'-rc-lookahead','0','-zerolatency','1'];
+  if (encoder === 'hevc_nvenc') return ['-preset','p4','-rc','vbr','-cq','22','-b:v',String(profile.average),...limits,'-rc-lookahead','0','-zerolatency','1','-profile:v','main'];
+  if (encoder === 'libx265') return ['-preset','veryfast','-crf','22',...limits,'-x265-params','log-level=error'];
+  return ['-preset','veryfast','-crf','20',...limits];
 }
 export class DiskBudget {
   constructor(root, limit = 8 * 1024 ** 3) { this.root = resolve(root); this.limit = limit; this.pins = new Map(); }

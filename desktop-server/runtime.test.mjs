@@ -40,3 +40,15 @@ test('720P到4K分两次执行2倍网络，1080P到4K只执行一次',()=>{
  assert.equal(cascade.match(/custom_shader_path/g).length,2);assert.equal(cascade.match(/fps=/g).length,1);
  const double=vulkanFilter(tools,{width:1920,height:1080},{width:3840,height:2160},'24/1');assert.equal(double.match(/custom_shader_path/g).length,1);
 });
+test('按设备硬解能力选择 HEVC，未上报或能力不足时回落 H.264，HEVC 码率更低',async()=>{
+ const { chooseCodec, encodingProfile } = await import('./runtime.mjs');
+ const tools={encoder:'h264_nvenc',codecs:{h264:'h264_nvenc',hevc:'hevc_nvenc'}};
+ const k310={hevc:{maxWidth:4096,maxHeight:2304,fps1080:60,fps2160:60}};
+ assert.deepEqual(chooseCodec(tools,k310,{width:3840,height:2160},29.97),{codec:'hevc',encoder:'hevc_nvenc'});
+ assert.deepEqual(chooseCodec(tools,undefined,{width:1920,height:1080},24),{codec:'h264',encoder:'h264_nvenc'});
+ assert.equal(chooseCodec(tools,{hevc:{maxWidth:1920,maxHeight:1088,fps1080:60,fps2160:0}},{width:3840,height:2160},24).codec,'h264');
+ assert.equal(chooseCodec(tools,{hevc:{maxWidth:4096,maxHeight:2304,fps1080:60,fps2160:30}},{width:3840,height:2160},60).codec,'h264');
+ assert.equal(chooseCodec({encoder:'h264_nvenc',codecs:{h264:'h264_nvenc'}},k310,{width:1920,height:1080},24).codec,'h264');
+ const h264=encodingProfile({width:3840,height:2160},24),hevc=encodingProfile({width:3840,height:2160},24,'hevc');
+ assert.equal(hevc.average,Math.round(h264.average*.6));assert(hevc.peak<h264.peak);
+});
