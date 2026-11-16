@@ -36,6 +36,25 @@ npm run desktop:server -- --host 0.0.0.0
 
 换集、换源、退出播放会取消子进程并释放前一个任务；服务还会在 30 分钟没有媒体请求后清理任务，最多 8 个并发任务。电脑中断时不会悄悄改成直连，设备提供「重试电脑串流」与「切回独立直连」，保留当前影片与播放位置。服务重启会清空播放任务，需重试创建。
 
+## Windows 运行
+
+已在 Windows 11 + RTX 3060 Laptop + Node.js 26 上验证。需要 NVIDIA 显卡和已安装的 Node.js 22.16+。
+
+双击项目根目录的 `start_windows.cmd`，或在终端执行：
+
+```bash
+node start_all.mjs
+```
+
+脚本依次安装依赖、构建网页、准备串流环境，然后同时启动网页服务（8080）和电脑串流服务（8090，监听局域网）。`--no-stream` 只启动网页；`--no-build` 跳过网页构建。Linux / macOS 也可使用同一脚本（macOS 没有 NVENC，请加 `--no-stream`）。
+
+- **FFmpeg**：超分需要 libplacebo。系统 FFmpeg 没有该滤镜时（例如 essentials 精简版），`desktop:setup` 会下载校验 FFmpeg 7.1.1 完整版并解包到 `.desktop-server/tools/ffmpeg`，不修改系统已安装的软件。
+- **防火墙**：电视 / 手机要从局域网访问，需在 Windows 防火墙放行 TCP 8080 和 8090。以管理员身份执行一次：`netsh advfirewall firewall add rule name="LibreTV" dir=in action=allow protocol=TCP localport=8080,8090 profile=private`。
+- **代理 Fake-IP**：检测到 198.18.0.0/15 的代理虚拟网卡时，启动脚本自动为串流服务加上 `--allow-fake-ip`。
+- **暂不支持**：高质量模式（`--quality`，Real-ESRGAN）的自动配置；默认的 FSRCNNX 超分、去广告、去水印、多来源比对和电脑片库均可用。
+
+验证命令与 Linux 相同：`npm run desktop:test`、`npm run desktop:check`，以及 `node desktop-server/check-overlay.mjs`、`check-compare.mjs`、`check-pipeline.mjs`。
+
 ## 模拟器固定测试源
 
 测试源与电脑串流服务是两个独立进程：8091 模拟网络片源，8090 模拟电脑中转。因此停掉 8090 后，设备仍可直接访问测试源。测试视频由 FFmpeg 生成，不下载或存储第三方影片。

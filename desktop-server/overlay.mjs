@@ -2,6 +2,7 @@
 // - 固定水印/台标：在不同场景的帧里，同一位置始终有边缘；
 // - 滚动字幕：画面上下边缘的横条，在 0.4 秒内整体水平平移，而画面中部没有同样的平移（排除镜头横摇）。
 // 字幕逐句变化、不会在所有场景同一处出现，也不会水平滚动，因此不会被当成叠加物。
+import { filterPath } from './runtime.mjs';
 export const ANALYSIS_WIDTH = 320;
 
 export function gradient(frame, w, h) {
@@ -214,7 +215,7 @@ export function delogoFilter(regions) {
   regions.filter((r) => !blurred(r) && !r.maskFile).forEach((r) => parts.push(`delogo=x=${r.x}:y=${r.y}:w=${r.w}:h=${r.h}`));
   // 有文字掩码的横幅：整条按上下边界插值（delogo），再只在文字像素（掩码，边缘柔化）处换成插值结果，周围画面保持原样
   regions.filter((r) => r.maskFile).forEach((r, i) => parts.push(`split[tx${i}a][tx${i}b];[tx${i}b]delogo=x=1:y=${r.y}:w=${r.w - 2}:h=${r.h},crop=iw:${r.h}:0:${r.y}[tx${i}d];` +
-    `movie=${r.maskFile},format=gray,gblur=sigma=2[tx${i}m];[tx${i}d][tx${i}m]alphamerge[tx${i}t];[tx${i}a][tx${i}t]overlay=0:${r.y}:format=auto`));
+    `movie=${filterPath(r.maskFile)},format=gray,gblur=sigma=2[tx${i}m];[tx${i}d][tx${i}m]alphamerge[tx${i}t];[tx${i}a][tx${i}t]overlay=0:${r.y}:format=auto`));
   const logos = parts.join(','), bands = regions.filter(blurred);
   if (!bands.length) return logos;
   // 纯色底：直接用底色填平，看不出处理痕迹。其余：模糊后叠回，上下 30% 渐变过渡，避免硬边色块

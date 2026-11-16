@@ -47,6 +47,8 @@ LibreTV-TV：在 LibreTV Next.js 迁移版基础上，增加 Android TV / 投影
 | App 电脑串流 | 8090 电脑串流服务 | 片源管理 → 填写电脑地址与配对码 → 电脑串流 |
 | 电脑浏览器 | 8080 Next.js 网页服务 | 浏览器打开 `http://localhost:8080` |
 
+Windows（NVIDIA 显卡）可双击 `start_windows.cmd` 同时启动网页服务与电脑串流服务，见[电脑串流说明](desktop-server/README.md#windows-运行)。
+
 详细实现与验证见 [Android TV 说明](android-tv/README.md)、[播放协议](android-tv/PLAYBACK_PROTOCOL.md)、[界面迁移记录](android-tv/NATIVE_UI_MIGRATION.md)及[电脑串流说明](desktop-server/README.md)。以下 Docker / 网页部署说明仍适用于网页端。
 
 ## 部署

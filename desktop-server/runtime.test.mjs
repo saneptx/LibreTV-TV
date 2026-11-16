@@ -52,3 +52,11 @@ test('按设备硬解能力选择 HEVC，未上报或能力不足时回落 H.264
  const h264=encodingProfile({width:3840,height:2160},24),hevc=encodingProfile({width:3840,height:2160},24,'hevc');
  assert.equal(hevc.average,Math.round(h264.average*.6));assert(hevc.peak<h264.peak);
 });
+
+test('滤镜路径：Linux 路径原样，Windows 盘符路径转正斜杠并转义冒号', async () => {
+ const { filterPath } = await import('./runtime.mjs');
+ assert.equal(filterPath('/tmp/m.pgm'), '/tmp/m.pgm');
+ assert.equal(filterPath('/tmp/a.glsl', true), "'/tmp/a.glsl'");
+ assert.equal(filterPath('C:\\Users\\a b\\m.pgm'), "'C\\:/Users/a b/m.pgm'");
+ assert.throws(() => filterPath("/tmp/a'b"));
+});
