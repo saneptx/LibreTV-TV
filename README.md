@@ -2,7 +2,7 @@
 
 LibreTV-TV：在 LibreTV Next.js 迁移版基础上，增加 Android TV / 投影仪独立 App、原生电视界面与可选的电脑增强串流。网页端基于 Next.js 15（App Router）+ TypeScript + Tailwind CSS，使用 ArtPlayer + hls.js；Android 端使用 Media3 解码播放。
 
-当前 Android APK 版本为 **0.8.4**（电视端应用显示名为 SuperTV），网页版本为 **2.19.6**。电视使用与启动方法见下方 [Android TV / 投影仪](#android-tv--投影仪)。
+当前 Android APK 版本为 **0.8.6**（电视端应用显示名为 SuperTV），网页版本为 **2.19.6**。电视使用与启动方法见下方 [Android TV / 投影仪](#android-tv--投影仪)。
 
 > 🏠 **官网**：[LibreTV 官网](https://libretv.is-an.org/)
 >

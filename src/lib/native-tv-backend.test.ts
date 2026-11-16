@@ -20,8 +20,10 @@ vi.mock('./store', () => ({
 vi.mock('./standalone-api', () => ({ standaloneStatus: () => ({ defaultSources: mock.sources }), standaloneDetail: mock.detail, standaloneSearch: mock.search, standaloneProbeQuality: mock.probe, mapConcurrent: async (items: unknown[], _limit: number, run: (item: unknown) => Promise<void>) => { for (const item of items) await run(item); } }));
 vi.mock('./db', () => ({
   db: { history: { get: mock.historyGet, orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) }, searchHistory: { orderBy: () => ({ reverse: () => ({ limit: () => ({ toArray: async () => [] }) }) }) }, progress: { get: mock.saved } },
+  listFavorites: async () => [], toggleFavorite: vi.fn(), importFavorites: vi.fn(), onLibraryChange: () => () => {},
   addSearchHistory: vi.fn(), clearSearchHistory: mock.clearSearch, saveProgress: mock.saveProgress, updateHistoryProgress: mock.updateHistory, upsertHistory: mock.upsertHistory,
 }));
+vi.mock('./library-sync', () => ({ startLibrarySync: () => ({ status: { enabled: false, syncing: false }, now: async () => {}, stop: () => {} }) }));
 vi.mock('./persist-storage', () => ({ flushPendingPersist: vi.fn() }));
 vi.mock('./subscription-sync', () => ({ syncSourceSubscription: vi.fn() }));
 

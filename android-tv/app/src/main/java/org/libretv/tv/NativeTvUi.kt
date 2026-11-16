@@ -295,10 +295,10 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         val focusedTitle=hotSection.findFocus()?.contentDescription
         hotItems=tv+movie; hotSection.removeAllViews()
         listOf("本周热门剧集" to tv,"本周热门电影" to movie).filter { it.second.isNotEmpty() }.forEach { (label,items) ->
-            hotSection.addView(sectionTitle(label,ui.text("来自豆瓣 · 确认键搜索片源",13,ui.muted)),ui.margins(-1,52).apply { topMargin=ui.px(6) })
+            hotSection.addView(sectionTitle(label,ui.text("来自豆瓣 · 确认键查看详情",13,ui.muted)),ui.margins(-1,52).apply { topMargin=ui.px(6) })
             val row=ui.row().apply { gravity=Gravity.TOP }
             items.forEach { item ->
-                val card=posterCard(item.cover,item.title,hotMeta(item),if(item.rate.isNotEmpty()) "豆瓣 ${item.rate}" else "",186) { searchFor(item.title) }
+                val card=posterCard(item.cover,item.title,hotMeta(item),if(item.rate.isNotEmpty()) "豆瓣 ${item.rate}" else "",186) { openHotDetail(hotCard(item)) }
                 featureOf[card]=hotFeature(item)
                 row.addView(card,shelfCell(244))
                 if(item.title==focusedTitle) card.post { card.requestFocus() }
@@ -310,7 +310,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     private fun hotMeta(item: TvHotList.Item)=listOf(if(item.tv) "剧集" else "电影",item.note).filter { it.isNotEmpty() }.joinToString(" · ")
     private fun hotFeature(item: TvHotList.Item)=TvHero.Feature("hot:${item.title}","本周热门",item.title,
         listOf(if(item.tv) "剧集" else "电影",if(item.rate.isNotEmpty()) "豆瓣 ${item.rate}" else "",item.note).filter { it.isNotEmpty() }.joinToString("   ·   "),
-        "",null,item.cover,"搜索片源",{ searchFor(item.title) })
+        "",null,item.cover,"查看详情",{ openHotDetail(hotCard(item)) })
     private fun renderFavorites() {
         val items=favorites.all()
         favCount.text=if(items.isEmpty()) "还没有收藏。在影片详情页或首页大图上选择「加入片库」" else "${items.size} 部收藏影片 · 确认键查看详情"
@@ -318,7 +318,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         favGrid.removeAllViews()
         items.forEachIndexed { index,card ->
             val count=card.optJSONArray("items")?.length() ?: 0
-            val view=posterCard(card.optString("pic"),card.optString("name"),listOf(card.optString("year"),card.optString("typeName")).filter { it.isNotEmpty() }.joinToString(" · "),if(count>1) "$count 源" else "",196) { openDetail(card) }
+            val view=posterCard(card.optString("pic"),card.optString("name"),listOf(card.optString("year"),card.optString("typeName")).filter { it.isNotEmpty() }.joinToString(" · "),if(count>1) "$count 源" else "",196) { openDetail(card, "我的片库") }
             favGrid.addView(view,ui.gridCell(index,6,254).apply { setMargins(ui.px(6),0,ui.px(6),ui.px(22)) })
             if(card.optString("name")==focusedName) view.post { view.requestFocus() }
         }
@@ -572,81 +572,284 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         }
         return p
     }
-    /** 详情页（全屏）：模糊海报背景、片名与简介、播放/下载按钮、来源与选集 */
-    private fun openDetail(card: JSONObject) {
-        val items = card.optJSONArray("items").objects()
-        if (items.isEmpty()) return
-        val poster = (activity.currentFocus as? LinearLayout)?.let { ((it.getChildAt(0) as? FrameLayout)?.getChildAt(0) as? ImageView)?.drawable }
+    /** 片名比对用：去掉空白和标点，「黑鸽 第二季」与「黑鸽第二季」视为同一部 */
+    private fun titleKey(value: String) = value.lowercase().replace(Regex("[\\s·:：,，.。!！?？'\"“”‘’()（）\\-—_\\[\\]【】]"), "")
+    /** 设计稿式的小信息标签：描边胶囊 */
+    private fun metaChip(label: String, strong: Boolean = false) = ui.text(label, 12, if (strong) Color.WHITE else Color.rgb(200, 200, 206)).apply {
+        setPadding(ui.px(9), ui.px(3), ui.px(9), ui.px(3)); isSingleLine = true
+        background = if (strong) ui.background(Color.argb(60, 255, 255, 255), radius = 6) else ui.background(Color.TRANSPARENT, Color.argb(90, 255, 255, 255), 6).apply { setStroke(maxOf(1, ui.px(1)), Color.argb(90, 255, 255, 255)) }
+    }
+    /**
+     * 详情页（全屏，按设计稿）：左侧竖版海报；右侧小标签、细体大标题、信息标签、简介、主演/导演/类型，立即播放 / 加入片库 / 下载到电脑；
+     * 下面是来源切换、剧集货架和相关推荐。card 可以先只有片名和海报（本周热门），lookup 为真时在后台搜索片源，找到后再填入来源与剧集。
+     * related 为相关推荐（同一次搜索的其他结果，或同类热门），确认键打开它们的详情。
+     */
+    private fun openDetail(card: JSONObject, label: String = "", lookup: Boolean = false, related: List<JSONObject> = emptyList(), rating: String = "") {
+        var items = card.optJSONArray("items").objects()
+        if (items.isEmpty() && !lookup) return
         val p = newPanel(card.optString("name"))
-        p.close.text="返回"; p.width=960; p.height=540
-        p.body.setPadding(ui.px(56),ui.px(40),ui.px(56),ui.px(28))
-        val shade=GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,intArrayOf(Color.argb(245,10,10,12),Color.argb(200,10,10,12),Color.argb(120,10,10,12)))
-        p.body.background=(poster as? android.graphics.drawable.BitmapDrawable)?.bitmap?.takeIf { !it.isRecycled }?.let { bitmap ->
-            val soft=android.graphics.Bitmap.createScaledBitmap(android.graphics.Bitmap.createScaledBitmap(bitmap,24,maxOf(2,24*bitmap.height/bitmap.width),true),120,maxOf(2,120*bitmap.height/bitmap.width),true)
-            android.graphics.drawable.LayerDrawable(arrayOf(android.graphics.drawable.BitmapDrawable(activity.resources,soft).apply { gravity=Gravity.FILL },shade))
-        } ?: shade
-        p.title.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(36).toFloat()); ui.fontWeight(p.title,800); p.title.layoutParams.height=-2
-        val meta=listOf(card.optString("year"),card.optString("typeName"),card.optString("remarks"),if(items.size>1) "${items.size} 个来源" else "").filter { it.isNotEmpty() }.joinToString("  ·  ")
-        (p.title.parent as LinearLayout).addView(ui.text(meta,14,ui.muted),ui.margins(-1,-2).apply { topMargin=ui.px(8) })
-        val desc=ui.text("",14,Color.rgb(210,210,215)).apply { maxLines=3; ellipsize=android.text.TextUtils.TruncateAt.END; setLineSpacing(0f,1.25f) }
-        val actions=ui.row()
-        var selected=items[0]
-        var downloadMode=false
-        val play=ui.button("▶  播放") { openPlayback(selected,0) }.apply { setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(16).toFloat()); ui.fontWeight(this,700) }
-        val download=ui.button("下载到电脑") {}.apply { setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(16).toFloat()); visibility=if(config.optBoolean("desktopConfigured")) View.VISIBLE else View.GONE }
-        actions.addView(play,ui.margins(-2,44).apply { rightMargin=ui.px(14) }); actions.addView(download,ui.margins(-2,44))
-        fun favoriteLabel()=if(favorites.has(card)) "✓   已在片库" else "＋   加入片库"
-        val favorite=ui.button(favoriteLabel()) {}.apply { setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(16).toFloat()) }
-        favorite.setOnClickListener { toast(if(favorites.toggle(card)) "已加入片库" else "已移出片库"); favorite.text=favoriteLabel(); if(page=="library") renderFavorites() }
-        actions.addView(favorite,ui.margins(-2,44).apply { leftMargin=ui.px(14) })
-        val tabs=ui.row()
-        val sourceButtons=mutableListOf<Button>()
-        val details = ui.column()
-        p.content.addView(desc,ui.margins(640,-2).apply { bottomMargin=ui.px(18) })
-        p.content.addView(actions,ui.margins(-1,-2).apply { bottomMargin=ui.px(22) })
-        p.content.addView(ui.text("来源",13,ui.muted).apply { ui.fontWeight(this,600) },ui.margins(-1,-2).apply { bottomMargin=ui.px(8) })
-        p.content.addView(HorizontalScrollView(activity).apply { addView(tabs); isFocusable = false; clipChildren=false; clipToPadding=false; isHorizontalScrollBarEnabled=false },ui.margins(-1,-2).apply { bottomMargin=ui.px(16) })
-        p.content.addView(details)
-        fun startDownload(item: JSONObject, n: Int) {
-            backend.request("download-desktop",JSONObject().put("item",item).put("index",n).put("decoders",DecoderCapabilities.json)) { event ->
-                if(event.optString("event")=="error") toast(event.optString("error")) else toast("已加入电脑下载：${item.optString("name")}${if(n>0) " 第 ${n+1} 集" else ""}")
+        p.heading.visibility = View.GONE; p.width = 960; p.height = 540
+        p.body.setPadding(ui.px(48), ui.px(34), ui.px(48), ui.px(20))
+        val shade = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Color.argb(250, 8, 8, 9), Color.argb(228, 8, 8, 9), Color.argb(175, 8, 8, 9)))
+        val fade = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.argb(240, 8, 8, 9)))
+        p.body.background = android.graphics.drawable.LayerDrawable(arrayOf(android.graphics.drawable.ColorDrawable(Color.rgb(12, 12, 14)), shade))
+        var posterBitmap: android.graphics.Bitmap? = null
+        val episodeImages = mutableListOf<ImageView>()
+        fun useBackdrop(drawable: android.graphics.drawable.Drawable?) {
+            val bitmap = (drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap?.takeIf { !it.isRecycled && it.width > 0 } ?: return
+            posterBitmap = bitmap
+            val soft = android.graphics.Bitmap.createScaledBitmap(android.graphics.Bitmap.createScaledBitmap(bitmap, 24, maxOf(2, 24 * bitmap.height / bitmap.width), true), 120, maxOf(2, 120 * bitmap.height / bitmap.width), true)
+            p.body.background = android.graphics.drawable.LayerDrawable(arrayOf(android.graphics.drawable.BitmapDrawable(activity.resources, soft).apply { gravity = Gravity.FILL }, shade, fade))
+            episodeImages.forEach { it.setImageBitmap(bitmap) }
+        }
+        // 顶部：海报 + 信息
+        val top = ui.row().apply { gravity = Gravity.TOP }
+        val posterFrame = FrameLayout(activity).apply { background = ui.posterBackground(14); clipToOutline = true; outlineProvider = android.view.ViewOutlineProvider.BACKGROUND; elevation = ui.px(16).toFloat() }
+        val posterImage = ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+        posterFrame.addView(posterImage, FrameLayout.LayoutParams(-1, -1))
+        top.addView(posterFrame, ui.margins(168, 252).apply { rightMargin = ui.px(34) })
+        val info = ui.column()
+        top.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+        val caption = ui.row()
+        caption.addView(View(activity).apply { setBackgroundColor(Color.argb(200, 255, 255, 255)) }, ui.margins(22, 1).apply { rightMargin = ui.px(10) })
+        caption.addView(ui.text(label.ifEmpty { "影片详情" }, 11, Color.rgb(190, 190, 196)).apply { letterSpacing = .28f; ui.fontWeight(this, 500) })
+        val title = ui.text(card.optString("name"), 38).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; ui.fontWeight(this, 300) }
+        val meta = ui.row()
+        val desc = ui.text("", 14, Color.rgb(205, 205, 212)).apply { maxLines = 3; ellipsize = android.text.TextUtils.TruncateAt.END; setLineSpacing(0f, 1.3f) }
+        val people = ui.column()
+        val actions = ui.row()
+        val note = ui.text("", 12, ui.muted)
+        info.addView(caption, ui.margins(-1, -2).apply { topMargin = ui.px(6) })
+        info.addView(title, ui.margins(-1, -2).apply { topMargin = ui.px(10) })
+        info.addView(meta, ui.margins(-1, -2).apply { topMargin = ui.px(12) })
+        info.addView(desc, ui.margins(620, -2).apply { topMargin = ui.px(14) })
+        info.addView(people, ui.margins(-1, -2).apply { topMargin = ui.px(10) })
+        info.addView(actions, ui.margins(-1, -2).apply { topMargin = ui.px(20) })
+        info.addView(note, ui.margins(-1, -2).apply { topMargin = ui.px(10) })
+        p.content.addView(top)
+        posters.load(posterImage, card.optString("pic")) { useBackdrop(posterImage.drawable) }
+        // 下方：来源、剧集、相关推荐
+        fun section(name: String, hint: TextView) = ui.row().apply {
+            addView(ui.text(name, 18).apply { ui.fontWeight(this, 500) }, ui.margins(-2, -2).apply { rightMargin = ui.px(12) }); addView(hint)
+        }
+        fun shelfOf(row: LinearLayout) = HorizontalScrollView(activity).apply { isHorizontalScrollBarEnabled = false; isFocusable = false; clipChildren = false; clipToPadding = false; overScrollMode = View.OVER_SCROLL_NEVER; setPadding(ui.px(8), ui.px(8), ui.px(8), ui.px(4)); addView(row) }
+        val sourceHint = ui.text("", 12, ui.muted)
+        val tabs = ui.row()
+        val sourceBlock = ui.column().apply { visibility = View.GONE }
+        sourceBlock.addView(section("来源", sourceHint), ui.margins(-1, -2).apply { topMargin = ui.px(22) })
+        sourceBlock.addView(shelfOf(tabs), ui.margins(-1, -2).apply { topMargin = ui.px(4); leftMargin = -ui.px(8) })
+        val episodeHint = ui.text("", 12, ui.muted)
+        val episodeRow = ui.row().apply { gravity = Gravity.TOP }
+        val episodeBlock = ui.column().apply { visibility = View.GONE }
+        episodeBlock.addView(section("剧集", episodeHint), ui.margins(-1, -2).apply { topMargin = ui.px(16) })
+        episodeBlock.addView(shelfOf(episodeRow), ui.margins(-1, -2).apply { topMargin = ui.px(2); leftMargin = -ui.px(8) })
+        val relatedRow = ui.row().apply { gravity = Gravity.TOP }
+        val relatedBlock = ui.column().apply { visibility = if (related.isEmpty()) View.GONE else View.VISIBLE }
+        val relatedHint = ui.text("确认键查看详情", 12, ui.muted)
+        relatedBlock.addView(section("相关推荐", relatedHint), ui.margins(-1, -2).apply { topMargin = ui.px(16) })
+        relatedBlock.addView(shelfOf(relatedRow), ui.margins(-1, -2).apply { topMargin = ui.px(2); leftMargin = -ui.px(8) })
+        p.content.addView(sourceBlock); p.content.addView(episodeBlock); p.content.addView(relatedBlock)
+        // 相关推荐：同系列（其他季、电影版）排在最前，其后是同一次搜索的其他结果或同类热门
+        var relatedKeys = emptyList<String>()
+        fun renderRelated(list: List<JSONObject>, seriesCount: Int) {
+            // 搜索中途会多次更新：名单没变就不重建，免得海报重新加载闪一下
+            val keys = list.take(20).map { titleKey(it.optString("name")) + "|" + (it.optJSONArray("items")?.length() ?: 0) } + "series:$seriesCount"
+            if (keys == relatedKeys) return
+            relatedKeys = keys
+            val focused = relatedRow.findFocus()?.contentDescription
+            relatedRow.removeAllViews()
+            relatedBlock.visibility = if (list.isEmpty()) View.GONE else View.VISIBLE
+            relatedHint.text = if (seriesCount > 0) "同系列 $seriesCount 部 · 确认键查看详情" else "确认键查看详情"
+            list.take(20).forEachIndexed { index, other ->
+                val count = other.optJSONArray("items")?.length() ?: 0
+                val sub = listOf(other.optString("year"), other.optString("remarks")).filter { it.isNotEmpty() }.joinToString(" · ")
+                val badge = if (index < seriesCount) "同系列" else if (count > 1) "$count 源" else other.optString("badge")
+                val view = posterCard(other.optString("pic"), other.optString("name"), sub, badge, 150) {
+                    p.dialog.dismiss(); main.post { if (other.optBoolean("hot")) openHotDetail(other) else openDetail(other, "相关推荐", related = list.filter { it !== other } + card) }
+                }
+                relatedRow.addView(view, LinearLayout.LayoutParams(ui.px(100), ui.px(204)).apply { setMargins(ui.px(6), 0, ui.px(6), ui.px(10)) })
+                if (other.optString("name") == focused) view.post { view.requestFocus() }
             }
         }
-        fun select(item: JSONObject) {
-            selected=item
-            sourceButtons.forEachIndexed { n,b -> b.isSelected=items[n]===item }
-            backend.cancel(panelId); p.status.visibility=View.VISIBLE; p.status.text="正在加载剧集…"; details.removeAllViews()
+        renderRelated(related, 0)
+        // 后台按系列名搜一次（不记进最近搜索），筛出同系列作品按季排好放到最前；同一系列名的结果缓存，各季之间来回看不再搜索
+        val seriesBase = TvSeries.base(card.optString("name"))
+        fun applySeries(groups: List<JSONObject>) {
+            if (panel !== p) return
+            val current = titleKey(card.optString("name"))
+            val entries = groups.map { Triple(it.optString("name"), it.optString("remarks"), it.optJSONArray("items")?.length() ?: 0) }
+            val series = TvSeries.arrange(entries, seriesBase, card.optString("name")).map { groups[it] }.filter { titleKey(it.optString("name")) != current }
+            if (series.isEmpty()) return
+            renderRelated(series + related.filter { r -> series.none { titleKey(it.optString("name")) == titleKey(r.optString("name")) } && titleKey(r.optString("name")) != current }, series.size)
+        }
+        if (seriesBase.length >= 2) {
+            val cached = seriesResults[titleKey(seriesBase)]
+            if (cached != null) applySeries(cached)
+            else {
+                // 搜索进行中每 3 秒更新一次，搜完再定稿并缓存
+                var shownAt = 0L
+                panelRequests.add(backend.request("search", JSONObject().put("query", seriesBase).put("record", false)) { event ->
+                    val value = event.optJSONObject("value") ?: return@request
+                    if (event.optString("event") !in setOf("result", "search-progress")) return@request
+                    val groups = value.optJSONArray("groups").objects()
+                    val done = value.optBoolean("done")
+                    if (done) { if (seriesResults.size >= 30) seriesResults.remove(seriesResults.keys.first()); seriesResults[titleKey(seriesBase)] = groups }
+                    if (done || SystemClock.elapsedRealtime() - shownAt >= 3000) { shownAt = SystemClock.elapsedRealtime(); applySeries(groups) }
+                })
+            }
+        }
+        // 看过这部：播放按钮改为接着看
+        val history = homeData.optJSONArray("history").objects().firstOrNull { titleKey(it.optString("title")) == titleKey(card.optString("name")) }
+        var selected: JSONObject? = null
+        var picked = false
+        var downloadMode = false
+        var episodes = JSONArray()
+        val play = ui.button("▶   立即播放") {}.apply { setTextSize(TypedValue.COMPLEX_UNIT_PX, ui.px(15).toFloat()); ui.fontWeight(this, 600); setPadding(ui.px(26), 0, ui.px(26), 0) }
+        fun favoriteLabel() = if (favorites.has(card)) "✓   已在片库" else "＋   加入片库"
+        val favorite = ui.button(favoriteLabel()) {}.apply { setTextSize(TypedValue.COMPLEX_UNIT_PX, ui.px(15).toFloat()); setPadding(ui.px(22), 0, ui.px(22), 0) }
+        favorite.setOnClickListener { if (items.isEmpty()) return@setOnClickListener; toast(if (favorites.toggle(card)) "已加入片库" else "已移出片库"); favorite.text = favoriteLabel(); if (page == "library") renderFavorites() }
+        val download = ui.button("下载到电脑") {}.apply { setTextSize(TypedValue.COMPLEX_UNIT_PX, ui.px(15).toFloat()); setPadding(ui.px(22), 0, ui.px(22), 0); visibility = if (config.optBoolean("desktopConfigured")) View.VISIBLE else View.GONE }
+        actions.addView(play, ui.margins(-2, 44).apply { rightMargin = ui.px(12) }); actions.addView(favorite, ui.margins(-2, 44).apply { rightMargin = ui.px(12) }); actions.addView(download, ui.margins(-2, 44))
+        fun resumeEntry() = history?.takeIf { h -> selected?.optString("sourceKey") == h.optString("sourceKey") && selected?.optString("vodId") == h.optString("vodId") }
+        fun refreshPlay() {
+            val entry = resumeEntry()
+            play.isEnabled = selected != null
+            play.text = when {
+                selected == null -> "▶   正在查找片源"
+                entry != null && entry.optInt("totalEpisodes") > 1 -> "▶   继续播放 · 第 ${entry.optInt("episodeIndex") + 1} 集"
+                entry != null -> "▶   继续播放"
+                else -> "▶   立即播放"
+            }
+        }
+        fun startDownload(item: JSONObject, n: Int) {
+            backend.request("download-desktop", JSONObject().put("item", item).put("index", n).put("decoders", DecoderCapabilities.json)) { event ->
+                if (event.optString("event") == "error") toast(event.optString("error")) else toast("已加入电脑下载：${item.optString("name")}${if (n > 0) " 第 ${n + 1} 集" else ""}")
+            }
+        }
+        play.setOnClickListener {
+            val item = selected ?: return@setOnClickListener
+            val entry = resumeEntry()
+            when {
+                entry != null -> resumeHistory(entry)
+                // 没手动选来源时，多个来源先比较码率再播
+                !picked && items.size > 1 -> { play.isEnabled = false; play.text = "▶   正在选择码率最高的来源…"; playBest(JSONObject(card.toString()).put("items", JSONArray(items))) { message -> note.text = message } }
+                else -> openPlayback(item, 0)
+            }
+        }
+        fun renderMeta(info: JSONObject) {
+            meta.removeAllViews()
+            val chips = mutableListOf<View>()
+            if (rating.isNotEmpty()) chips.add(metaChip("豆瓣 $rating", true))
+            listOf(info.optString("year").ifEmpty { card.optString("year") }).filter { it.isNotEmpty() }.forEach { chips.add(ui.text(it, 13, Color.rgb(200, 200, 206))) }
+            info.optString("remarks").ifEmpty { card.optString("remarks") }.takeIf { it.isNotEmpty() }?.let { chips.add(metaChip(it)) }
+            listOf(info.optString("typeName").ifEmpty { card.optString("typeName") }, info.optString("area")).filter { it.isNotEmpty() }.forEach { chips.add(ui.text(it, 13, Color.rgb(200, 200, 206))) }
+            if (items.size > 1) chips.add(ui.text("${items.size} 个来源", 13, Color.rgb(200, 200, 206)))
+            chips.forEach { meta.addView(it, ui.margins(-2, -2).apply { rightMargin = ui.px(14) }) }
+            people.removeAllViews()
+            fun line(name: String, value: String) { if (value.isBlank()) return
+                val row = ui.row(); row.addView(ui.text(name, 12, ui.muted), ui.margins(40, -2)); row.addView(ui.text(value.trim().take(60), 12, Color.rgb(205, 205, 212)).apply { isSingleLine = true; ellipsize = android.text.TextUtils.TruncateAt.END }, ui.margins(560, -2))
+                people.addView(row, ui.margins(-1, -2).apply { topMargin = ui.px(5) }) }
+            line("主演", info.optString("actor").split(Regex("[,，/、]")).map { it.trim() }.filter { it.isNotEmpty() }.take(5).joinToString("、"))
+            line("导演", info.optString("director"))
+            line("类型", listOf(info.optString("typeName"), info.optString("area")).filter { it.isNotEmpty() }.joinToString(" · "))
+        }
+        fun renderEpisodes(item: JSONObject) {
+            episodeRow.removeAllViews(); episodeImages.clear()
+            val count = episodes.length()
+            episodeBlock.visibility = if (count > 1) View.VISIBLE else View.GONE
+            if (count <= 1) return
+            episodeHint.text = "${item.optString("sourceName")} · 共 $count 集"
+            val watched = resumeEntry()?.optInt("episodeIndex", -1) ?: -1
+            for (n in 0 until count) {
+                val cell = ui.column().apply { id = View.generateViewId(); isFocusable = true; isFocusableInTouchMode = true }
+                val frame = FrameLayout(activity).apply { background = ui.posterBackground(10); clipToOutline = true; outlineProvider = android.view.ViewOutlineProvider.BACKGROUND }
+                val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; alpha = .55f; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                posterBitmap?.let { image.setImageBitmap(it) }; episodeImages.add(image)
+                frame.addView(image, FrameLayout.LayoutParams(-1, -1))
+                frame.addView(View(activity).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.TRANSPARENT, Color.argb(170, 0, 0, 0))) }, FrameLayout.LayoutParams(-1, -1))
+                frame.addView(ui.text("%02d".format(n + 1), 20, Color.WHITE).apply { ui.fontWeight(this, 300) }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.LEFT).apply { setMargins(ui.px(10), 0, 0, ui.px(6)) })
+                if (n == watched) frame.addView(ui.text("上次看到", 10, Color.WHITE, true).apply { setPadding(ui.px(7), ui.px(2), ui.px(7), ui.px(2)); background = ui.background(Color.argb(150, 0, 0, 0), radius = 20) }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.LEFT).apply { setMargins(ui.px(8), ui.px(8), 0, 0) })
+                cell.addView(frame, ui.margins(-1, 72))
+                val name = ui.text("第 ${n + 1} 集", 13).apply { ui.fontWeight(this, 500); isSingleLine = true }
+                cell.addView(name, ui.margins(-1, -2).apply { topMargin = ui.px(8); leftMargin = ui.px(2) })
+                ui.cardFocus(cell, frame, name); cell.contentDescription = "第 ${n + 1} 集"
+                cell.setOnClickListener { if (downloadMode) startDownload(item, n) else openPlayback(item, n, if (n == watched) history?.optDouble("playbackPosition") else null) }
+                episodeRow.addView(cell, LinearLayout.LayoutParams(ui.px(128), ui.px(108)).apply { setMargins(ui.px(6), 0, ui.px(6), ui.px(6)) })
+            }
+        }
+        val sourceButtons = mutableListOf<Pair<JSONObject, Button>>()
+        fun select(item: JSONObject, byUser: Boolean = false) {
+            selected = item; picked = picked || byUser; refreshPlay()
+            sourceButtons.forEach { (it, b) -> b.isSelected = it === item }
+            backend.cancel(panelId); note.text = "正在读取 ${item.optString("sourceName")} 的剧集…"
             panelId = backend.request("detail", JSONObject().put("item", item)) { event ->
                 if (panel !== p) return@request
-                if (event.optString("event") == "error") {
-                    p.status.text = event.optString("error")
-                    details.addView(ui.button("重试") { select(item) }); return@request
-                }
+                if (event.optString("event") == "error") { note.text = "${item.optString("sourceName")}：${event.optString("error")}（可换一个来源）"; return@request }
                 val detail = event.optJSONObject("value")?.optJSONObject("detail") ?: return@request
-                val info = detail.optJSONObject("videoInfo") ?: JSONObject()
-                val episodes = detail.optJSONArray("episodes") ?: JSONArray()
-                p.status.text=""; p.status.visibility=View.GONE
+                val videoInfo = detail.optJSONObject("videoInfo") ?: JSONObject()
+                episodes = detail.optJSONArray("episodes") ?: JSONArray()
+                note.text = ""
                 @Suppress("DEPRECATION")
-                desc.text = Html.fromHtml(info.optString("desc")).toString().trim().take(240)
-                desc.visibility=if(desc.text.isEmpty()) View.GONE else View.VISIBLE
+                desc.text = Html.fromHtml(videoInfo.optString("desc")).toString().trim().replace(Regex("\\s+"), " ").take(200)
+                desc.visibility = if (desc.text.isEmpty()) View.GONE else View.VISIBLE
+                renderMeta(videoInfo)
                 download.setOnClickListener {
-                    if(episodes.length()<=1) startDownload(item,0)
-                    else { downloadMode=!downloadMode; download.text=if(downloadMode) "选择要下载的集 · 再按取消" else "下载到电脑"; download.isSelected=downloadMode }
+                    if (episodes.length() <= 1) startDownload(item, 0)
+                    else { downloadMode = !downloadMode; download.text = if (downloadMode) "选择要下载的集 · 再按取消" else "下载到电脑"; download.isSelected = downloadMode }
                 }
-                if(episodes.length()>1) {
-                    details.addView(ui.text("选集 · 共 ${episodes.length()} 集",13,ui.muted).apply { ui.fontWeight(this,600) },ui.margins(-1,-2).apply { bottomMargin=ui.px(8) })
-                    val eps = ui.grid(10)
-                    for (n in 0 until episodes.length()) eps.addView(ui.button("${n + 1}") {
-                        if(downloadMode) startDownload(item,n) else openPlayback(item, n)
-                    }.apply { background=ui.focusedBackground(radius=14) }, ui.gridCell(n, 10, 44))
-                    details.addView(eps)
-                }
-                if (p.dialog.currentFocus === p.close || p.dialog.currentFocus == null) play.requestFocus()
+                renderEpisodes(item)
+                if (p.dialog.currentFocus == null || p.dialog.currentFocus === p.close) play.requestFocus()
             }
         }
-        items.forEach { item -> val button=ui.button(item.optString("sourceName")) { select(item) }; sourceButtons.add(button); tabs.addView(button,ui.margins(-2,38).apply { rightMargin=ui.px(10) }) }
-        p.show(); select(items[0]); play.requestFocus()
+        fun attach(found: List<JSONObject>) {
+            val fresh = found.filter { f -> sourceButtons.none { (it, _) -> it.optString("sourceKey") == f.optString("sourceKey") && it.optString("vodId") == f.optString("vodId") } }
+            if (fresh.isEmpty()) return
+            items = items + fresh.filter { f -> items.none { it.optString("sourceKey") == f.optString("sourceKey") && it.optString("vodId") == f.optString("vodId") } }
+            card.put("items", JSONArray(items))
+            fresh.forEach { item -> val button = ui.button(item.optString("sourceName")) { select(item, true) }; sourceButtons.add(item to button); tabs.addView(button, ui.margins(-2, 34).apply { rightMargin = ui.px(10) }) }
+            sourceBlock.visibility = View.VISIBLE
+            sourceHint.text = if (items.size > 1) "${items.size} 个来源 · 默认播放码率最高的" else "1 个来源"
+            if (selected == null) select(history?.let { h -> items.firstOrNull { it.optString("sourceKey") == h.optString("sourceKey") && it.optString("vodId") == h.optString("vodId") } } ?: items[0])
+        }
+        renderMeta(JSONObject()); refreshPlay()
+        p.show()
+        play.requestFocus()
+        if (items.isNotEmpty()) attach(items)
+        if (lookup) {
+            // 本周热门：在已启用的片源里按片名找这部剧，找到第一个同名结果就先填上，之后到达的来源继续追加
+            note.text = "正在 ${config.optInt("enabled")} 个片源里查找《${card.optString("name")}》…"
+            val key = titleKey(card.optString("name"))
+            val id = backend.request("search", JSONObject().put("query", card.optString("name")).put("record", false)) { event ->
+                if (panel !== p) return@request
+                val value = event.optJSONObject("value") ?: return@request
+                if (event.optString("event") !in setOf("result", "search-progress")) return@request
+                val groups = value.optJSONArray("groups").objects()
+                val match = groups.firstOrNull { titleKey(it.optString("name")) == key }
+                    ?: if (value.optBoolean("done")) groups.filter { g -> titleKey(g.optString("name")).let { it.contains(key) || key.contains(it) } }.minByOrNull { it.optString("name").length } else null
+                if (match != null) {
+                    listOf("year", "typeName", "remarks").forEach { k -> if (card.optString(k).isEmpty() && match.optString(k).isNotEmpty()) card.put(k, match.optString(k)) }
+                    attach(match.optJSONArray("items").objects())
+                }
+                if (value.optBoolean("done") && items.isEmpty()) {
+                    note.text = "没有在已启用的片源里找到《${card.optString("name")}》"
+                    play.text = "搜索其他结果"; play.isEnabled = true
+                    play.setOnClickListener { p.dialog.dismiss(); main.post { searchFor(card.optString("name")) } }
+                }
+            }
+            panelRequests.add(id)
+        }
     }
+    /** 系列名搜索结果（按系列名缓存），详情页的同系列推荐用 */
+    private val seriesResults = LinkedHashMap<String, List<JSONObject>>()
+    /** 本周热门卡片进入详情页：先显示豆瓣的片名、海报和评分，后台查找片源；相关推荐为同类热门 */
+    private fun openHotDetail(hot: JSONObject) {
+        val tv = hot.optBoolean("tv")
+        val related = hotItems.filter { it.tv == tv && it.title != hot.optString("name") }.map { hotCard(it) }
+        openDetail(JSONObject().put("name", hot.optString("name")).put("pic", hot.optString("pic")).put("typeName", if (tv) "剧集" else "电影"),
+            "本周热门 · ${if (tv) "剧集" else "电影"}", lookup = true, related = related, rating = hot.optString("rate"))
+    }
+    private fun hotCard(item: TvHotList.Item) = JSONObject().put("name", item.title).put("pic", item.cover).put("rate", item.rate).put("tv", item.tv).put("hot", true)
+        .put("remarks", item.note).put("badge", if (item.rate.isNotEmpty()) "豆瓣 ${item.rate}" else "")
     private var choosingId: String? = null
     // 遥控器停在多来源影片卡片上 0.8 秒后预探各来源码率，确认时多半已有结果
     private val cardOf = java.util.WeakHashMap<View, JSONObject>()
@@ -657,14 +860,14 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if (items.length() > 1 && prefetched.add(card.optString("key", card.optString("name")))) backend.request("prefetch-bitrates", JSONObject().put("items", items))
     }
     /** 遥控器确认影片卡片：多个来源时先比较实测码率，播放码率最高的可用来源 */
-    private fun playBest(card: JSONObject) {
+    private fun playBest(card: JSONObject, onStatus: ((String) -> Unit)? = null) {
         val items=card.optJSONArray("items") ?: return
         if (items.length()<=1) { items.optJSONObject(0)?.let { openPlayback(it,0) }; return }
         if (loadingPlayback || choosingId!=null) return
         val before=status.text.toString()
-        status.text="正在比较 ${items.length()} 个来源的码率…"
+        status.text="正在比较 ${items.length()} 个来源的码率…"; onStatus?.invoke(status.text.toString())
         choosingId=backend.request("best-source",JSONObject().put("items",items)) { event ->
-            choosingId=null; status.text=before
+            choosingId=null; status.text=before; onStatus?.invoke("")
             val value=event.optJSONObject("value")
             val item=value?.optJSONObject("item") ?: items.optJSONObject(0) ?: return@request
             if (event.optString("event")=="result" && value.optString("quality").isNotEmpty()) toast("已选码率最高的来源：${item.optString("sourceName")} · ${value.optString("quality")}")
@@ -686,9 +889,10 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             switching = true; resumeAfterSwitch = !state.optBoolean("paused")
             command("pause"); main.removeCallbacks(hideControls); seekPreview = null
             TvMotion.visible(controls,false,ui.px(26).toFloat()); TvMotion.visible(top,false,-ui.px(18).toFloat()); TvMotion.visible(buffer,false); TvMotion.visible(seekOverlay,false)
-            if (panel?.dialog?.isShowing == true) { keepLoading = true; panel?.dialog?.dismiss() }
             playback.requestFocus()
         }
+        // 选集面板、详情页等收起，露出加载片头；这次关闭不算取消
+        if (panel?.dialog?.isShowing == true) { keepLoading = true; panel?.dialog?.dismiss() }
         // 从片库播放的本来就是已下载的版本
         playerDownloadButton.text=if(fromLibrary) "已下载" else "下载"; playerDownloadButton.isEnabled=!fromLibrary
         val opening=if(fromLibrary) "正在从电脑片库读取…" else if(config.optString("playbackMode")=="desktop") "正在连接电脑处理视频…" else "正在连接片源…"
@@ -1327,6 +1531,8 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         return false
     }
     fun release() { hot.close(); backend.cancel(compareId); closeDesktopPlayback(); disposed=true; posters.close(); panel?.dialog?.dismiss(); main.removeCallbacksAndMessages(null) }
+    /** 搜索结果进入详情页，相关推荐为同一次搜索的其他结果 */
+    private fun openSearchDetail(card: JSONObject) = openDetail(card, "搜索结果", related = adapter.cards.filter { it !== card && !it.has("history") })
     private inner class MovieAdapter {
         var cards: List<JSONObject> = emptyList()
         var visible=72
@@ -1413,14 +1619,15 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             root.contentDescription=if(entry!=null) "历史观看：${card.optString("name")}" else card.optString("name")
             if(entry==null) cardOf[root]=card else cardOf.remove(root)
             if(entry!=null) featureOf[root]=historyFeature(entry) else featureOf.remove(root)
-            root.setOnClickListener { if(entry!=null) resumeHistory(entry) else openDetail(card) }
+            root.setOnClickListener { if(entry!=null) resumeHistory(entry) else openSearchDetail(card) }
             // 确认键：短按直接播放（原逻辑）；搜索结果长按进入详情页，可选来源、选集、下载到电脑
             var longPressed=false
             root.setOnKeyListener { _,code,event ->
                 if(code==KeyEvent.KEYCODE_DPAD_CENTER || code==KeyEvent.KEYCODE_ENTER) {
                     if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) longPressed=false
-                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount>0 && !longPressed && entry==null) { longPressed=true; openDetail(card) }
-                    if(event.action==KeyEvent.ACTION_UP && !longPressed) { if(entry!=null) resumeHistory(entry) else playBest(card) }
+                    // 搜索结果：短按进入详情页，长按直接播放码率最高的来源
+                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount>0 && !longPressed && entry==null) { longPressed=true; playBest(card) }
+                    if(event.action==KeyEvent.ACTION_UP && !longPressed) { if(entry!=null) resumeHistory(entry) else openSearchDetail(card) }
                     true
                 } else false
             }

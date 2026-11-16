@@ -35,15 +35,16 @@ export function desktopAddress(value: string): string {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('电脑服务地址只能包含协议、主机和端口');
   return url.origin;
 }
-async function api(settings: DesktopSettings, path: string, method: 'GET' | 'POST' | 'DELETE', body?: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
+async function api(settings: DesktopSettings, path: string, method: 'GET' | 'POST' | 'DELETE', body?: unknown, signal?: AbortSignal, limits: { timeoutMs?: number; maxBytes?: number } = {}): Promise<Record<string, unknown>> {
   const base = desktopAddress(settings.desktopServerUrl), token = settings.desktopPairingToken.trim();
   if (token.length < 24 || token.length > 256 || /[\r\n]/.test(token)) throw new Error('请填写电脑服务生成的配对码（独立直连无需配对）');
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+  const timeoutMs = limits.timeoutMs ?? 8000;
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
   const abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) controller.abort();
   try {
     const options = { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal };
-    const response = await (getNativeHttpBridge() ? nativeFetch(base + path, { ...options, timeoutMs: 7000, maxBytes: 65536 }) : fetch(base + path, options));
+    const response = await (getNativeHttpBridge() ? nativeFetch(base + path, { ...options, timeoutMs: timeoutMs - 1000, maxBytes: limits.maxBytes ?? 65536 }) : fetch(base + path, options));
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || `电脑服务返回 ${response.status}`);
     return result;
@@ -57,6 +58,10 @@ export async function testDesktopConnection(settings: DesktopSettings, signal?: 
   const result = await api(settings, '/v1/status', 'GET', undefined, signal);
   if (result.protocol !== 1 || result.service !== 'LibreTV Desktop' || !['relay','enhance'].includes(String(result.processing))) throw new Error('电脑服务版本不兼容，请更新服务');
   return result.processing === 'enhance' ? `已连接电脑 · 广告分片过滤 / ${String((result.capabilities as Record<string, unknown>)?.model || 'AI')} 超分 / 编码已启用` : '已连接电脑 · 当前仅串流，去广告和超分尚未启用';
+}
+/** 资料同步：推送本机修改、取回其他设备的修改（见 desktop-server/sync.mjs） */
+export async function exchangeDesktopLibrary(settings: DesktopSettings, body: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  return api(settings, '/v1/sync', 'POST', body, signal, { timeoutMs: 20000, maxBytes: 4 * 1024 * 1024 });
 }
 /** 设备硬件解码能力（APK 上报），电脑据此选择 HEVC 或 H.264 输出 */
 export type DecoderReport = Partial<Record<'hevc' | 'h264' | 'av1', { maxWidth: number; maxHeight: number; fps1080: number; fps2160: number }>>;

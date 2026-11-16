@@ -9,6 +9,7 @@ import { stat } from 'node:fs/promises';
 import { processedPlaylist, cleanPosition } from './processing.mjs';
 import { CompareJob } from './compare.mjs';
 import { createLibrary } from './library.mjs';
+import { createSyncStore } from './sync.mjs';
 
 const uid = () => randomBytes(16).toString('hex');
 const failure = (status, message) => Object.assign(new Error(message), { status });
@@ -40,7 +41,7 @@ export function rewritePlaylist(body, base, asset) {
   }).join('\n');
 }
 
-export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = false, idleMs = 30 * 60_000, lookupHost = lookup, processor = null, libraryDir } = {}) {
+export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = false, idleMs = 30 * 60_000, lookupHost = lookup, processor = null, libraryDir, syncFile } = {}) {
   if (typeof token !== 'string' || token.length < 24 || token.length > 256) throw new Error('需要至少 24 字符的配对码');
   const secret = Buffer.from(`Bearer ${token}`), sessions = new Map(), comparisons = new Map(), compareResults = new Map();
   const stats = { created: 0, mediaRequests: 0, playlistRequests: 0, rangeRequests: 0, bytes: 0 };
@@ -101,6 +102,9 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
   // 电脑片库：后台下载整集处理结果；播放请求命中已完成的影片时直接读取
   const library = processor ? createLibrary({ processor, dir: libraryDir, network: (job) => ({ open: (url, range, signal) => upstream(url, range ? { Range: `bytes=${range.start}-${range.end}` } : {}, 'GET', job, 0, signal) }) }) : null;
   const libraryReady = library?.load().catch((error) => console.error('电脑片库载入失败：' + error.message));
+  // 多设备资料同步（历史、进度、搜索记录、片库收藏）：串流与增强模式都可用
+  const sync = createSyncStore({ file: syncFile });
+  let syncReady;
   function closeComparison(job) { job.closed = true; job.task?.close(); for (const req of job.requests) req.destroy(); comparisons.delete(job.id); }
   function closeSession(session) {
     session.closed = true; session.pipeline?.close();
@@ -130,7 +134,12 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
       if (!authorized(req)) throw failure(401, '电脑服务配对码不匹配');
       const path = new URL(req.url, 'http://desktop.local').pathname;
       if (path === '/v1/status' && req.method === 'GET') {
-        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, deviceAdSegments: true, devicePlaylists: true, crossSourceCompare: true, overlayRemoval: true, downloads: true, codecs: Object.keys(processor.tools.codecs || { h264: true }), superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
+        send(res, 200, { protocol: 1, service: 'LibreTV Desktop', sync: 1, processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, deviceAdSegments: true, devicePlaylists: true, crossSourceCompare: true, overlayRemoval: true, downloads: true, codecs: Object.keys(processor.tools.codecs || { h264: true }), superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
+      }
+      if (path === '/v1/sync' && req.method === 'POST') {
+        syncReady ??= sync.load();
+        await syncReady;
+        send(res, 200, sync.exchange(await readJson(req))); return;
       }
       if (path === '/v1/downloads' && req.method === 'GET') {
         if (!library) throw failure(501, '电脑下载需要电脑增强处理环境');
@@ -283,5 +292,5 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
   const cleanup = setInterval(() => { for (const job of comparisons.values()) if (Date.now() - job.touched > Math.min(idleMs, 10 * 60_000)) closeComparison(job); for (const session of sessions.values()) if (Date.now() - session.touched > (session.pipeline?.info.state === 'preparing' ? Math.min(idleMs,30_000) : idleMs)) closeSession(session); }, Math.min(idleMs, 10_000));
   cleanup.unref();
   server.on('close', () => { clearInterval(cleanup); library?.close(); for (const job of comparisons.values()) closeComparison(job); for (const session of sessions.values()) closeSession(session); });
-  return { server, closeSessions: () => { for (const session of sessions.values()) closeSession(session); } };
+  return { server, sync, closeSessions: () => { for (const session of sessions.values()) closeSession(session); void sync.flush(); } };
 }

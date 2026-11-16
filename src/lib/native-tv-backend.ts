@@ -2,12 +2,13 @@ import { discoverSources, updateSourceCandidate } from './source-discovery';
 import { sourceCache } from './source-cache';
 import { standaloneDetail, standaloneSearch, standaloneStatus, standaloneProbeQuality, mapConcurrent } from './standalone-api';
 import { useAppStore, resolveSource } from './store';
-import { addSearchHistory, clearSearchHistory, db, saveProgress, updateHistoryProgress, upsertHistory } from './db';
+import { addSearchHistory, clearSearchHistory, db, importFavorites, listFavorites, onLibraryChange, saveProgress, toggleFavorite, updateHistoryProgress, upsertHistory } from './db';
+import { startLibrarySync, type SyncReply } from './library-sync';
 import { aggregateResults } from './result-groups';
 import { qualityKey, qualityLabel, isQualityEntryFresh } from './quality';
 import { flushPendingPersist } from './persist-storage';
 import { syncSourceSubscription } from './subscription-sync';
-import { addDesktopDownload, closeDesktopSession, compareOnDesktop, listDesktopDownloads, removeDesktopDownload, resolvePlaybackDelivery, sanitizeDecoders, testDesktopConnection, sourcePosition, sourceDuration, type RemovedInterval, type DesktopSession } from './desktop-playback';
+import { addDesktopDownload, closeDesktopSession, exchangeDesktopLibrary, compareOnDesktop, listDesktopDownloads, removeDesktopDownload, resolvePlaybackDelivery, sanitizeDecoders, testDesktopConnection, sourcePosition, sourceDuration, type RemovedInterval, type DesktopSession } from './desktop-playback';
 import { analyzePlaylist, clearLearnedAds, decideAds, learnAdAt, loadLearnedAds, saveLearnedAd, type AdTransport, type MediaAnalysis } from './ad-analysis';
 import { decodeNativeBytes, encodeNativeBytes, nativeFetch, nativeRpc } from './native-http';
 import type { SearchResultItem, SourceConfig } from './types';
@@ -173,12 +174,19 @@ function config() {
     playbackMode: store.playbackMode || 'direct', desktopServerUrl: store.desktopServerUrl || '', desktopPairingToken: store.desktopPairingToken || '',
   };
 }
+let librarySync: ReturnType<typeof startLibrarySync> | undefined;
 async function home() {
-  const [history, searches] = await Promise.all([
+  const [history, searches, favorites] = await Promise.all([
     db.history.orderBy('timestamp').reverse().limit(100).toArray(),
     db.searchHistory.orderBy('timestamp').reverse().limit(10).toArray(),
+    listFavorites(),
   ]);
-  return { config: config(), history, searches };
+  return { config: config(), history, searches, favorites: favorites.map((f) => ({ ...f.card, addedAt: f.addedAt })), sync: librarySync ? { ...librarySync.status } : undefined };
+}
+/** 配了电脑服务（地址 + 配对码）就同步资料，与播放走电脑串流还是独立直连无关 */
+function syncServer(): string {
+  const s = useAppStore.getState();
+  return s.desktopServerUrl && s.desktopPairingToken ? s.desktopServerUrl : '';
 }
 
 /** 原生 UI 与既有业务层的版本化接口。取消和 request id 隔离搜索/面板迟到的结果。 */
@@ -199,11 +207,21 @@ export function installNativeTvBackend(): () => void {
       switch (op) {
         case 'home': value = await home(); break;
         case 'clear-search-history': await clearSearchHistory(); value=await home(); break;
+        case 'toggle-favorite': {
+          const card = args.card as Record<string, unknown> | undefined;
+          if (!card || typeof card !== 'object') throw new Error('影片信息无效');
+          value = { favorite: await toggleFavorite(card), home: await home() }; break;
+        }
+        case 'import-favorites': {
+          const items = Array.isArray(args.items) ? args.items.filter((i): i is Record<string, unknown> => !!i && typeof i === 'object') : [];
+          value = { imported: await importFavorites(items), home: await home() }; break;
+        }
+        case 'sync-now': await librarySync?.now(); value = await home(); break;
         case 'config': value = config(); break;
         case 'search': {
           const wd = String(args.query || '').trim();
-          await addSearchHistory(wd);
-          progress('search-history', await home());
+          // 详情页按片名查找片源（本周热门）时 record 为 false，不记进最近搜索
+          if (args.record !== false) { await addSearchHistory(wd); progress('search-history', await home()); }
           const sources = nativeSources();
           const outcomes: SearchResultItem[] = [];
           let completed = 0, failures = 0, lastEmit = 0;
@@ -409,7 +427,9 @@ export function installNativeTvBackend(): () => void {
           if (typeof args.overlayRemoval === 'boolean') patch.overlayRemoval = args.overlayRemoval;
           if (typeof args.adFilter === 'boolean') patch.adFilter = args.adFilter;
           if (typeof args.autoplayNext === 'boolean') patch.autoplayNext = args.autoplayNext;
-          useAppStore.getState().updateSettings(patch); flushPendingPersist(); value = config(); break;
+          useAppStore.getState().updateSettings(patch); flushPendingPersist(); value = config();
+          if (patch.desktopServerUrl !== undefined || patch.desktopPairingToken !== undefined) void librarySync?.now();
+          break;
         }
         default: throw new Error('未知的原生界面请求');
       }
@@ -424,8 +444,14 @@ export function installNativeTvBackend(): () => void {
       await useAppStore.persist.rehydrate();
       if (disposed) return;
       useAppStore.getState().setEnvSources(standaloneStatus().defaultSources);
+      librarySync = startLibrarySync(syncServer, async (body, signal) => {
+        const s = useAppStore.getState();
+        return await exchangeDesktopLibrary({ desktopServerUrl: s.desktopServerUrl, desktopPairingToken: s.desktopPairingToken }, body, signal) as unknown as SyncReply;
+      });
       emit({ event: 'ready', value: await home() });
     } catch (error) { emit({ event: 'fatal', error: error instanceof Error ? error.message : '本地数据初始化失败' }); }
   })();
-  return () => { disposed = true; controllers.forEach((c) => c.abort()); controllers.clear(); delete castWindow().LibreTvBackend; sourceCache.flush(); flushPendingPersist(); };
+  // 其他设备的修改同步进来后通知界面刷新首页、片库
+  const unsubscribe = onLibraryChange((origin) => { if (origin === 'sync') void home().then((value) => emit({ event: 'library-changed', value })); });
+  return () => { disposed = true; unsubscribe(); librarySync?.stop(); librarySync = undefined; controllers.forEach((c) => c.abort()); controllers.clear(); delete castWindow().LibreTvBackend; sourceCache.flush(); flushPendingPersist(); };
 }

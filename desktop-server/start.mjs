@@ -28,7 +28,7 @@ if (values.processing === 'enhance') {
   try { processor = createProcessor(await toolConfig({ model: values.model, encoder: values.encoder, targetHeight: values['target-height'] === 'auto' ? 'auto' : Number(values['target-height']), chunkSeconds: Number(values['chunk-seconds']), ffmpeg: values.ffmpeg, ffprobe: values.ffprobe, sr: values.sr }), { cacheBytes, startupBufferSeconds:Number(values['startup-buffer-seconds']) }); }
   catch (error) { console.error('电脑增强环境未就绪：'+error.message+'。请执行 npm run desktop:setup，或显式选择 --processing relay。'); process.exit(1); }
 }
-const { server, closeSessions } = createDesktopServer({ token, allowTestOrigin: values['allow-test-origin'], allowFakeIp: values['allow-fake-ip'], processor });
+const { server, closeSessions } = createDesktopServer({ token, allowTestOrigin: values['allow-test-origin'], allowFakeIp: values['allow-fake-ip'], processor, syncFile: resolve(dir, 'sync.json') });
 server.on('error', (error) => { console.error(`电脑服务启动失败：${error.code || error.message}`); process.exitCode = 1; });
 server.listen(port, values.host, () => {
   console.log(`LibreTV 电脑串流服务：http://${values.host}:${port}`);
