@@ -337,5 +337,15 @@
     "url": "https://api.souavzyw.net/api.php/provide/vod",
     "detail": "https://api.souavzyw.net",
     "isAdult": true
+  },
+  {
+    "name": "西瓜资源",
+    "url": "https://caiji.xgzyapi.com/api.php/provide/vod",
+    "detail": "https://caiji.xgzyapi.com"
+  },
+  {
+    "name": "大众资源",
+    "url": "https://cdn.dzzyapi.com/api.php/provide/vod",
+    "detail": "https://cdn.dzzyapi.com"
   }
 ]
