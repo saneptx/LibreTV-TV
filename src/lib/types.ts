@@ -132,6 +132,8 @@ export interface AuthStatusResponse {
   /** 当前会话是否已验证 */
   verified: boolean;
   version: string;
+  /** 网页服务所在电脑配置了串流服务，可经 /api/sync 同步观看资料（独立 App 内不提供） */
+  librarySync?: boolean;
   /** 部署者通过 DEFAULT_SOURCES 环境变量预置的采集站（未配置时为空数组） */
   defaultSources: SourceConfig[];
   /** 部署者通过 DEFAULT_LIVE_SOURCES 环境变量预置的直播源（未配置时为空数组） */

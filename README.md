@@ -235,6 +235,8 @@ kill "$(cat .desktop-server/server.pid)" # 停止该后台服务
 | `DEFAULT_LIVE_SOURCES` | 否 | 预置直播源（M3U 订阅），JSON 数组：`[{"name":"源名","url":"https://.../list.m3u","epg":"https://.../epg.xml.gz"}]`，`epg` 为可选的 XMLTV 节目单地址 |
 | `DEFAULT_SUBSCRIPTIONS` | 否 | 预置数据源订阅（LibreTV-SourceList JSON 链接，也接受 TVBOX 配置地址），JSON 数组：`["https://.../sources.json", {"url":"https://.../list.json","name":"名称"}]`。首次访问自动导入点播源与直播源，之后每 24h 静默刷新；用户删除后不再自动加回 |
 | `DEFAULT_RECOMMEND_SOURCE` | 否 | 首页推荐数据源的默认值（`douban` / `bangumi` / `hot-list`，出厂默认 `hot-list`）；仅对未在设置中主动选择过的用户生效，用户的选择始终优先 |
+| `DESKTOP_SERVER_URL` | 否 | 资料同步使用的电脑串流服务地址，默认 `http://127.0.0.1:8090`（与网页服务在同一台电脑） |
+| `DESKTOP_PAIRING_TOKEN` | 否 | 上述串流服务的配对码；未设置时读取运行目录下的 `.desktop-server/config.json`。两者都没有时网页端不启用资料同步 |
 | `LIVE_ALLOW_PRIVATE` | 否 | 设为 `1` 时允许直播流代理访问内网/保留地址（自建 IPTV 场景），默认关闭以维持 SSRF 防护 |
 
 ## 使用说明

@@ -5,6 +5,7 @@ import { getEnvLiveSources } from '@/lib/env-live-sources';
 import { getEnvSubscriptions } from '@/lib/env-subscriptions';
 import { getEnvRecommendSource } from '@/lib/env-recommend-source';
 import { getEnvImageMode } from '@/lib/env-image-mode';
+import { desktopHub } from '@/lib/desktop-hub';
 
 export const runtime = 'nodejs';
 
@@ -28,5 +29,7 @@ export async function GET(req: Request) {
     defaultRecommendSource: getEnvRecommendSource() ?? null,
     // 部署者通过 DEFAULT_IMAGE_MODE 指定的封面图加载方式默认值（未配置时为 null）
     defaultImageMode: getEnvImageMode() ?? null,
+    // 这台电脑配置了串流服务时，浏览器经 /api/sync 与电视、手机同步观看资料
+    librarySync: !!(await desktopHub()),
   });
 }
