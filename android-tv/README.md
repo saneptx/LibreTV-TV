@@ -6,6 +6,20 @@
 
 0.4.2 默认超分只升高一个档位（720P → 1080P、1080P → 4K），换源按原始分辨率降序并保持焦点。0.4.1 增加原始/输出分辨率、实际超分与去广告结果标注，电脑端提供可选 4K 档位。0.4.0 将可选电脑串流升级为广告分片过滤、GPU 超分和 H.264/AAC 编码（先在模拟器验证），入口仍位于原来的「片源管理」。独立直连仍为默认模式；界面及遥控逻辑保持原样。启动、配对与测试见 [电脑串流说明](../desktop-server/README.md)。
 
+
+## 手机端与模拟器
+
+同一个安装包在手机 / 平板上自动进入手机界面（`MainActivity` 按设备类型判断：带 leanback 或没有触摸屏的走电视界面）。手机界面就是随包分发的网页端手机版（首页、片库、搜索、播放页），数据由设备直连片源，不需要电脑；播放用网页播放器，全屏时自动横屏。暂未接入：与电脑服务的同步、已下载、直播、投屏到电视。
+
+本机调试用两个虚拟设备（系统镜像与 AVD 都在 `android-tv/` 下的忽略目录里）：
+
+```bash
+export ANDROID_SDK_ROOT=$PWD/android-tv/.android-sdk ANDROID_AVD_HOME=$PWD/android-tv/.android-avd
+android-tv/.android-sdk/emulator/emulator -avd SuperTV-TV -port 5554      # Android TV 14，1080p
+android-tv/.android-sdk/emulator/emulator -avd SuperTV-Phone -port 5556   # Android 15，Pixel 7
+android-tv/.android-sdk/platform-tools/adb -s emulator-5556 install -r android-tv/app/build/outputs/apk/debug/app-debug.apk
+```
+
 ## 构建
 
 先在项目根目录执行 `npm ci`，再安装 JDK 17 和 Android SDK 35。之后，在 Android Studio 中选择 `app` 并运行，或从 Gradle 工具窗口执行 `app > Tasks > build > assembleDebug`。也可直接使用仓库内的 Gradle Wrapper：

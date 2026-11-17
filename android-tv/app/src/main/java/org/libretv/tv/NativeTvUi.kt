@@ -45,7 +45,25 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     private var curtainSession = ""
     private val liftCurtain = Runnable { curtain.lift() }
     // 首页大图推荐：内容跟随卡片焦点（稍作延迟，快速划过时不闪）
-    private val hero = TvHero(ui, posters) { backdrop.show(it) }
+    private val hero: TvHero = TvHero(ui, posters, { showStill(it) }) { if (stillKey != hero.current?.key) backdrop.show(it) }
+    // 背景当前显示的是哪一部的剧照；为空表示显示的是柔光（模糊海报）
+    private var stillKey: String? = null
+    // 主推轮播：最近看的一部加本周热门的前几部；焦点停在主推按钮上时每 8 秒换一部
+    private var slides = emptyList<TvHero.Feature>()
+    private val rotate = object : Runnable { override fun run() {
+        main.postDelayed(this, 8000)
+        // 焦点在某张影片卡片上时主推跟着卡片走，不轮播
+        if (page != "home" || active != null || panel != null || searched.isNotEmpty() || slides.size < 2 || !view.hasWindowFocus() || view.findFocus()?.let { featureOf[it] } != null) return
+        val index = slides.indexOfFirst { it.key == hero.current?.key }
+        hero.show(slides[(index + 1) % slides.size])
+    } }
+    private fun showStill(feature: TvHero.Feature) {
+        hero.page(slides.size, slides.indexOfFirst { it.key == feature.key })
+        if (stillKey == feature.key) return
+        stillKey = null
+        if (feature.doubanId.isEmpty()) return
+        hot.still(feature.doubanId, feature.tv) { url -> if (url != null && hero.current?.key == feature.key && page == "home") { stillKey = feature.key; backdrop.showStill(url) } }
+    }
     // 顶栏三个页面（首页 / 片库 / 已下载）加搜索页；同一时刻只显示一个
     private var page = "home"
     private val tabs = linkedMapOf<String, Button>()
@@ -166,9 +184,12 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             if (focused != null && active == null) featureOf[focused]?.let { pendingFeature=it; main.removeCallbacks(applyFeature); main.postDelayed(applyFeature,140) }
             // 焦点移到影片卡片：背景换成该片海报的模糊大图
             if (focused != null && active == null && focused.contentDescription != null && focused is LinearLayout && focused.childCount > 0 && focused.getChildAt(0) is FrameLayout)
-                ((focused.getChildAt(0) as FrameLayout).getChildAt(0) as? ImageView)?.drawable?.let { backdrop.show(it) }
+                ((focused.getChildAt(0) as FrameLayout).getChildAt(0) as? ImageView)?.drawable?.let { if (stillKey == null || stillKey != featureOf[focused]?.key) { stillKey = null; backdrop.show(it) } }
         }
         ui.fontWeight(playerTitle,800); ui.fontWeight(bufferSpeed,500); ui.fontWeight(seekTime,600)
+        // 往下翻到海报行时把背景压暗，免得清晰的剧照和海报抢画面
+        homeScroll.setOnScrollChangeListener { _, _, y, _, _ -> backdrop.alpha = 1f - .8f * (y / ui.px(220).toFloat()).coerceIn(0f, 1f) }
+        main.postDelayed(rotate, 8000)
     }
     private fun sectionTitle(label: String, trailing: View? = null) = ui.row().apply {
         setPadding(0,ui.px(10),0,ui.px(5))
@@ -197,7 +218,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         home.addView(header, ui.margins(-1,48).apply { bottomMargin=ui.px(12) })
 
         // 首页：大图推荐 · 继续观看 · 本周热门
-        homePage.addView(hero, ui.margins(-1,336))
+        homePage.addView(hero, ui.margins(-1,350))
         watchSection.addView(sectionTitle("继续观看",watchCount),ui.margins(-1,52).apply { topMargin=ui.px(6) })
         watchSection.addView(watchShelf,shelfParams())
         homePage.addView(watchSection); homePage.addView(hotSection)
@@ -259,6 +280,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if(!ready || key==page) return
         if(page=="search") leaveSearch()
         page=key; applyPage(); homeScroll.scrollTo(0,0)
+        if(key!="home" && stillKey!=null) { stillKey=null; backdrop.clear() }
         when(key) {
             "library" -> renderFavorites()
             "downloads" -> { downloadsHint.text=if(config.optBoolean("desktopConfigured")) "正在读取电脑片库…" else "还没有连接电脑服务：在设置里填写电脑地址后，可以把影片交给电脑下载和处理"; refreshLibrary() }
@@ -274,7 +296,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     }
     private fun searchFor(title: String) { showPage("search"); search.setText(title); startSearch(title) }
     /** 竖版海报卡片：海报、片名、一行信息，可带左上角标签 */
-    private fun posterCard(pic: String, name: String, sub: String, badge: String, posterHeight: Int, action: () -> Unit): LinearLayout {
+    private fun posterCard(pic: String, name: String, sub: String, badge: String, posterHeight: Int, rank: Int = 0, action: () -> Unit): LinearLayout {
         val card=ui.column().apply { id=View.generateViewId(); isFocusable=true; isFocusableInTouchMode=true }
         val poster=FrameLayout(activity).apply { background=ui.posterBackground(); clipToOutline=true; outlineProvider=android.view.ViewOutlineProvider.BACKGROUND }
         val image=ImageView(activity).apply { scaleType=ImageView.ScaleType.CENTER_CROP; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
@@ -282,6 +304,12 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if(badge.isNotEmpty()) poster.addView(ui.text(badge,10,Color.WHITE,true).apply {
             setPadding(ui.px(8),ui.px(3),ui.px(8),ui.px(3)); background=ui.background(Color.argb(150,0,0,0),radius=20)
         },FrameLayout.LayoutParams(-2,-2,Gravity.TOP or Gravity.LEFT).apply { setMargins(ui.px(8),ui.px(8),0,0) })
+        // 榜单名次：海报左下角的大号数字，底下压一层渐暗保证看得清
+        if(rank>0) {
+            poster.addView(View(activity).apply { background=GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,intArrayOf(Color.argb(190,0,0,0),Color.TRANSPARENT)) },FrameLayout.LayoutParams(-1,ui.px(70),Gravity.BOTTOM))
+            poster.addView(ui.text(rank.toString(),40,Color.WHITE).apply { ui.fontWeight(this,800); setShadowLayer(ui.px(6).toFloat(),0f,ui.px(1).toFloat(),Color.argb(170,0,0,0)) },
+                FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM or Gravity.LEFT).apply { setMargins(ui.px(10),0,0,ui.px(6)) })
+        }
         card.addView(poster,ui.margins(-1,posterHeight))
         val title=ui.text(name,14,bold=true).apply { ui.fontWeight(this,600); maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END }
         card.addView(title,ui.margins(-1,22).apply { topMargin=ui.px(11); leftMargin=ui.px(3); rightMargin=ui.px(3) })
@@ -294,11 +322,11 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     private fun renderHot(tv: List<TvHotList.Item>, movie: List<TvHotList.Item>) {
         val focusedTitle=hotSection.findFocus()?.contentDescription
         hotItems=tv+movie; hotSection.removeAllViews()
-        listOf("本周热门剧集" to tv,"本周热门电影" to movie).filter { it.second.isNotEmpty() }.forEach { (label,items) ->
+        listOf("剧集热播榜 Top 10" to tv.take(10),"电影热播榜 Top 10" to movie.take(10)).filter { it.second.isNotEmpty() }.forEach { (label,items) ->
             hotSection.addView(sectionTitle(label,ui.text("来自豆瓣 · 确认键查看详情",13,ui.muted)),ui.margins(-1,52).apply { topMargin=ui.px(6) })
             val row=ui.row().apply { gravity=Gravity.TOP }
-            items.forEach { item ->
-                val card=posterCard(item.cover,item.title,hotMeta(item),if(item.rate.isNotEmpty()) "豆瓣 ${item.rate}" else "",186) { openHotDetail(hotCard(item)) }
+            items.forEachIndexed { index,item ->
+                val card=posterCard(item.cover,item.title,hotMeta(item),if(item.rate.isNotEmpty()) "豆瓣 ${item.rate}" else "",186,index+1) { openHotDetail(hotCard(item)) }
                 featureOf[card]=hotFeature(item)
                 row.addView(card,shelfCell(244))
                 if(item.title==focusedTitle) card.post { card.requestFocus() }
@@ -310,7 +338,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     private fun hotMeta(item: TvHotList.Item)=listOf(if(item.tv) "剧集" else "电影",item.note).filter { it.isNotEmpty() }.joinToString(" · ")
     private fun hotFeature(item: TvHotList.Item)=TvHero.Feature("hot:${item.title}","本周热门",item.title,
         listOf(if(item.tv) "剧集" else "电影",if(item.rate.isNotEmpty()) "豆瓣 ${item.rate}" else "",item.note).filter { it.isNotEmpty() }.joinToString("   ·   "),
-        "",null,item.cover,"查看详情",{ openHotDetail(hotCard(item)) })
+        "",null,item.cover,"查看详情",{ openHotDetail(hotCard(item)) },doubanId=item.id,tv=item.tv)
     private fun renderFavorites() {
         val items=favorites.all()
         favCount.text=if(items.isEmpty()) "还没有收藏。在影片详情页或首页大图上选择「加入片库」" else "${items.size} 部收藏影片 · 确认键查看详情"
@@ -416,7 +444,8 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             statusPrefix.text=""; status.text="输入片名，按确认键搜索 ${config.optInt("enabled")} 个片源"
             watchCount.text="最近观看 ${adapter.count} 部 · 确认键继续播放"
             // 大图推荐：焦点在某张卡片上就显示它（进度可能刚更新），否则显示最近看过的一部
-            val feature=home.findFocus()?.let { featureOf[it] } ?: data.optJSONArray("history").objects().firstOrNull()?.let { historyFeature(it) } ?: hotItems.firstOrNull()?.let { hotFeature(it) }
+            slides=listOfNotNull(data.optJSONArray("history").objects().firstOrNull()?.let { historyFeature(it) })+hotItems.filter { it.tv }.take(6).map { hotFeature(it) }
+            val feature=home.findFocus()?.let { featureOf[it] } ?: slides.find { it.key==hero.current?.key } ?: slides.firstOrNull()
             if(feature!=null) hero.show(feature) else hero.clear()
             hero.visibility=if(feature!=null) View.VISIBLE else View.GONE
         }
@@ -1314,126 +1343,148 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         p.show(); load()
     }
     private fun formatRate()=if(rate%1.0==0.0) rate.toInt().toString() else rate.toString()
-    private fun showSourceSettings(focusMode: Boolean = false) {
+    // 设置：左边是分组导航，焦点移到哪一组右边就显示哪一组；右边是一行行「名称 … 取值」
+    private var settingsTab = "playback"
+    private fun showSourceSettings(tab: String = settingsTab) {
         if(!ready) return
-        val p=newPanel("片源管理")
+        val p=newPanel("设置")
         p.width=883; p.height=486; p.close.text="完成"
-        p.body.setPadding(ui.px(24),ui.px(11),ui.px(24),ui.px(16))
-        p.body.background=ui.background(ui.sheet,Color.argb(26,255,255,255),26)
+        p.body.setPadding(ui.px(26),ui.px(16),ui.px(26),ui.px(18))
         p.title.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(24).toFloat())
-        (p.title.parent as LinearLayout).addView(ui.text(if(config.optString("playbackMode")=="desktop") "电脑负责画面处理和串流" else "独立运行 · 设备直接访问片源，无需电脑服务器",13,ui.muted),ui.margins(-1,-2).apply { topMargin=ui.px(5) })
-        p.status.text="已启用 ${config.optInt("enabled")} 个片源。按确认键切换，设置自动保存。"
+        p.body.removeView(p.scroll); p.status.minHeight=ui.px(16)
+        val nav=ui.column()
+        val pane=ui.column().apply { setPadding(ui.px(10),ui.px(6),ui.px(10),ui.px(14)) }
+        val paneScroll=ScrollView(activity).apply { isFocusable=false; isVerticalScrollBarEnabled=false; overScrollMode=View.OVER_SCROLL_NEVER; addView(pane) }
+        val split=ui.row().apply { gravity=Gravity.TOP }
+        split.addView(nav,ui.margins(190,-2).apply { rightMargin=ui.px(14); topMargin=ui.px(6) })
+        split.addView(paneScroll,LinearLayout.LayoutParams(0,-1,1f))
+        p.body.addView(split,LinearLayout.LayoutParams(-1,0,1f))
+        val navButtons=linkedMapOf<String,Button>()
+        var first: View?=null
+        fun edge(view: View): View { navButtons[settingsTab]?.let { view.nextFocusLeftId=it.id }; if(first==null) first=view; return view }
         fun style(view: View) {
-            if(view is Button) { view.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(14).toFloat()); view.setPadding(ui.px(12),ui.px(8),ui.px(12),ui.px(8)) }
-            if(view is EditText) { view.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(14).toFloat()); view.setPadding(ui.px(12),0,ui.px(12),0) }
-            view.background=ui.focusedBackground(radius=if(view is EditText) 19 else 18)
+            if(view is Button) { view.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(14).toFloat()); view.setPadding(ui.px(14),ui.px(8),ui.px(14),ui.px(8)) }
+            if(view is EditText) { view.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(15).toFloat()); view.setPadding(ui.px(18),0,ui.px(18),0) }
+            view.background=ui.focusedBackground(radius=14)
         }
-        p.content.addView(ui.text("播放模式",17,bold=true),ui.margins(-1,-2).apply { bottomMargin=ui.px(8) })
-        val modes=ui.row()
-        listOf("direct" to "独立直连", "desktop" to "电脑串流").forEach { (mode,label) ->
-            val button=ui.button(label) {
-                backend.request("settings",JSONObject().put("playbackMode",mode)) { event ->
-                    event.optJSONObject("value")?.let { applyConfig(it); p.dialog.dismiss(); showSourceSettings(true) }
-                }
-            }.apply { style(this); isSelected=config.optString("playbackMode","direct")==mode }
-            modes.addView(button,LinearLayout.LayoutParams(0,ui.px(38),1f).apply { rightMargin=ui.px(12) })
+        fun group(label: String) = pane.addView(ui.text(label,12,ui.muted).apply { letterSpacing=.1f; ui.fontWeight(this,600) },ui.margins(-1,-2).apply { topMargin=ui.px(if(pane.childCount==0) 4 else 18); bottomMargin=ui.px(8); leftMargin=ui.px(6) })
+        fun note(label: String) = pane.addView(ui.text(label,12,ui.muted).apply { setLineSpacing(ui.px(3).toFloat(),1f) },ui.margins(-1,-2).apply { topMargin=ui.px(8); leftMargin=ui.px(6); rightMargin=ui.px(6) })
+        fun row(label: String, value: () -> String, action: (done: () -> Unit) -> Unit) {
+            lateinit var item: TvWidgets.SettingRow
+            item=ui.settingRow(label,value()) { action { item.value.text=value() } }
+            pane.addView(edge(item.view),ui.margins(-1,46).apply { bottomMargin=ui.px(6) })
         }
-        p.content.addView(modes)
-        fun superLabel()="AI 超分：${if(config.optBoolean("superResolution",true)) "已开启 · 自动升高一个档位" else "已关闭 · 保持原始分辨率"}（电脑串流）"
-        val superToggle=ui.button(superLabel()) {}.apply { style(this); isSelected=config.optBoolean("superResolution",true) }
-        superToggle.setOnClickListener {
-            backend.request("settings",JSONObject().put("superResolution",!config.optBoolean("superResolution",true))) { event ->
-                event.optJSONObject("value")?.let { applyConfig(it); superToggle.text=superLabel(); superToggle.isSelected=config.optBoolean("superResolution",true) }
-            }
-        }
-        p.content.addView(superToggle,ui.margins(-1,38).apply { topMargin=ui.px(10) })
-        fun overlayLabel()="去水印：${if(config.optBoolean("overlayRemoval",true)) "已开启 · 固定台标/水印与滚动广告字幕" else "已关闭 · 保持原画"}（电脑串流）"
-        val overlayToggle=ui.button(overlayLabel()) {}.apply { style(this); isSelected=config.optBoolean("overlayRemoval",true) }
-        overlayToggle.setOnClickListener {
-            backend.request("settings",JSONObject().put("overlayRemoval",!config.optBoolean("overlayRemoval",true))) { event ->
-                event.optJSONObject("value")?.let { applyConfig(it); overlayToggle.text=overlayLabel(); overlayToggle.isSelected=config.optBoolean("overlayRemoval",true) }
-            }
-        }
-        p.content.addView(overlayToggle,ui.margins(-1,38).apply { topMargin=ui.px(10) })
-        p.content.addView(ui.text("串流需电脑服务持续运行；处理能力以连接检测结果为准。",13,ui.muted),ui.margins(-1,-2).apply { topMargin=ui.px(8); bottomMargin=ui.px(8) })
-        val server=ui.input("电脑服务地址，例如 http://192.168.1.10:8090").apply { style(this); setText(config.optString("desktopServerUrl")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }
-        val pairing=ui.input("电脑服务配对码").apply { style(this); setText(config.optString("desktopPairingToken")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
-        val connection=ui.row()
-        connection.addView(server,LinearLayout.LayoutParams(0,ui.px(38),1.5f).apply { rightMargin=ui.px(12) })
-        connection.addView(pairing,LinearLayout.LayoutParams(0,ui.px(38),1f).apply { rightMargin=ui.px(12) })
-        var connecting=false
-        val connect=ui.button("保存并测试") {
-            if (!connecting) {
-                connecting=true; p.status.text="正在连接电脑服务…"
-                val args=JSONObject().put("desktopServerUrl",server.text.toString()).put("desktopPairingToken",pairing.text.toString())
-                backend.request("settings",args) { saved ->
-                    saved.optJSONObject("value")?.let { applyConfig(it) }
-                    backend.request("test-desktop",args) { event ->
-                        connecting=false
-                        p.status.text=if(event.optString("event")=="error") event.optString("error") else event.optString("value")
+        fun field(input: EditText) = pane.addView(edge(input.apply { style(this) }),ui.margins(-1,44).apply { bottomMargin=ui.px(8) })
+        fun action(button: Button) = pane.addView(edge(button.apply { style(this) }),ui.margins(-2,40).apply { topMargin=ui.px(4) })
+        fun onOff(key: String) = if(config.optBoolean(key,true)) "已开启" else "已关闭"
+        fun sourcesStatus() = "已启用 ${config.optInt("enabled")} 个片源 · 确认键切换，自动保存"
+        fun render(key: String) {
+            settingsTab=key; navButtons.forEach { (k,button) -> button.isSelected=k==key }
+            pane.removeAllViews(); paneScroll.scrollTo(0,0); first=null; p.status.text=""
+            when(key) {
+                "playback" -> {
+                    group("播放方式")
+                    row("播放模式",{ if(config.optString("playbackMode")=="desktop") "电脑串流" else "独立直连" }) { done ->
+                        backend.request("settings",JSONObject().put("playbackMode",if(config.optString("playbackMode")=="desktop") "direct" else "desktop")) { event -> event.optJSONObject("value")?.let { applyConfig(it); done() } }
                     }
+                    note("独立直连：电视自己访问片源，不需要电脑。电脑串流：由电脑去广告、超分后再传给电视，电脑服务要一直开着。")
+                    group("画面处理（仅电脑串流）")
+                    row("AI 超分",{ if(config.optBoolean("superResolution",true)) "已开启 · 升高一个档位" else "已关闭 · 原始分辨率" }) { done ->
+                        backend.request("settings",JSONObject().put("superResolution",!config.optBoolean("superResolution",true))) { event -> event.optJSONObject("value")?.let { applyConfig(it); done() } }
+                    }
+                    row("去水印",{ if(config.optBoolean("overlayRemoval",true)) "已开启 · 台标与滚动广告字幕" else "已关闭 · 保持原画" }) { done ->
+                        backend.request("settings",JSONObject().put("overlayRemoval",!config.optBoolean("overlayRemoval",true))) { event -> event.optJSONObject("value")?.let { applyConfig(it); done() } }
+                    }
+                    note("处理能力以电脑服务的连接检测结果为准。")
+                }
+                "desktop" -> {
+                    group("电脑服务地址")
+                    val server=ui.input("例如 http://192.168.1.10:8090").apply { setText(config.optString("desktopServerUrl")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }
+                    field(server)
+                    group("配对码")
+                    val pairing=ui.input("电脑服务启动时显示的配对码").apply { setText(config.optString("desktopPairingToken")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+                    field(pairing)
+                    var connecting=false
+                    action(ui.button("保存并测试") {
+                        if (!connecting) {
+                            connecting=true; p.status.text="正在连接电脑服务…"
+                            val args=JSONObject().put("desktopServerUrl",server.text.toString()).put("desktopPairingToken",pairing.text.toString())
+                            backend.request("settings",args) { saved ->
+                                saved.optJSONObject("value")?.let { applyConfig(it) }
+                                backend.request("test-desktop",args) { event ->
+                                    connecting=false
+                                    p.status.text=if(event.optString("event")=="error") event.optString("error") else event.optString("value")
+                                }
+                            }
+                        }
+                    })
+                    note("连上电脑服务后，观看记录、片库和搜索记录会在各设备间同步，还可以把影片交给电脑下载。")
+                }
+                "sources" -> {
+                    p.status.text=sourcesStatus()
+                    val sources=ui.grid(3)
+                    config.optJSONArray("sources").objects().forEachIndexed { index,source ->
+                        val id=source.optString("key")
+                        fun enabled()=config.optJSONArray("selectedKeys").strings().contains(id)
+                        fun label()="${if(enabled()) "✓ " else "○ "}${source.optString("name")}"
+                        val button=ui.button(label()) {}.apply { style(this); isSelected=enabled(); gravity=Gravity.CENTER_VERTICAL or Gravity.LEFT; isSingleLine=true; ellipsize=android.text.TextUtils.TruncateAt.END }
+                        if(index%3==0) edge(button)
+                        button.setOnClickListener {
+                            backend.request("toggle-source",JSONObject().put("key",id)) { event -> event.optJSONObject("value")?.let {
+                                applyConfig(it); button.text=label(); button.isSelected=enabled(); if(settingsTab=="sources") p.status.text=sourcesStatus()
+                            } }
+                        }
+                        sources.addView(button,ui.gridCell(index,3,38).apply { setMargins(ui.px(4),ui.px(4),ui.px(4),ui.px(4)) })
+                    }
+                    pane.addView(sources)
+                }
+                "add" -> {
+                    group("名称（可选）")
+                    val name=ui.input("给这个片源起个名字"); field(name)
+                    group("Apple CMS 接口地址")
+                    val url=ui.input("https://example.com/api.php/provide/vod").apply { inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }; field(url)
+                    action(ui.button("添加片源") {
+                        backend.request("add-source",JSONObject().put("name",name.text.toString()).put("url",url.text.toString())) { event ->
+                            if(event.optString("event")=="error") p.status.text=event.optString("error")
+                            else { event.optJSONObject("value")?.let { applyConfig(it) }; name.setText(""); url.setText(""); p.status.text="片源已添加并启用"; toast("片源已添加并启用") }
+                        }
+                    })
+                }
+                "subscriptions" -> {
+                    group("订阅地址")
+                    val subscription=ui.input("https://example.com/sources.json").apply { inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }; field(subscription)
+                    var busy=false
+                    val syncButtons=mutableListOf<Button>()
+                    fun sync(value: String) {
+                        if(busy) return
+                        busy=true; syncButtons.forEach { it.isEnabled=false }; p.status.text="正在从设备同步订阅…"
+                        backend.request("sync-subscription",JSONObject().put("url",value.trim())) { event ->
+                            busy=false; syncButtons.forEach { it.isEnabled=true }
+                            if(event.optString("event")=="error") p.status.text=event.optString("error")
+                            else backend.request("config") { e -> e.optJSONObject("value")?.let { applyConfig(it); toast("订阅已同步"); if(panel===p && settingsTab=="subscriptions") { render("subscriptions"); p.status.text="订阅已同步" } } }
+                        }
+                    }
+                    action(ui.button("同步订阅") { sync(subscription.text.toString()) }.also { syncButtons.add(it) })
+                    note("支持 LibreTV SourceList 和 TVBOX 的直连接口；Spider 类订阅暂不支持。")
+                    val saved=config.optJSONArray("subscriptions").objects()
+                    if(saved.isNotEmpty()) group("已保存的订阅")
+                    saved.forEach { sub -> row(sub.optString("name").ifEmpty { sub.optString("url") },{ "更新" }) { _ -> sync(sub.optString("url")) } }
                 }
             }
-        }.apply { style(this) }
-        connection.addView(connect,ui.margins(-2,38)); p.content.addView(connection)
-        // Keep the new rows predictable with a remote; wide buttons must not jump into the source grid.
-        val direct=modes.getChildAt(0); val desktop=modes.getChildAt(1)
-        direct.nextFocusLeftId=direct.id; direct.nextFocusRightId=desktop.id; direct.nextFocusUpId=p.close.id; direct.nextFocusDownId=superToggle.id
-        desktop.nextFocusLeftId=direct.id; desktop.nextFocusRightId=desktop.id; desktop.nextFocusUpId=p.close.id; desktop.nextFocusDownId=superToggle.id
-        superToggle.nextFocusUpId=if(config.optString("playbackMode")=="desktop") desktop.id else direct.id; superToggle.nextFocusDownId=server.id
-        server.nextFocusLeftId=server.id; server.nextFocusRightId=pairing.id; server.nextFocusUpId=superToggle.id
-        pairing.nextFocusLeftId=server.id; pairing.nextFocusRightId=connect.id; pairing.nextFocusUpId=superToggle.id
-        connect.nextFocusLeftId=pairing.id; connect.nextFocusRightId=connect.id; connect.nextFocusUpId=superToggle.id
-        p.close.nextFocusDownId=if(config.optString("playbackMode")=="desktop") desktop.id else direct.id
-        val sources=ui.grid(4)
-        config.optJSONArray("sources").objects().forEachIndexed { index,source ->
-            val key=source.optString("key")
-            fun enabled()=config.optJSONArray("selectedKeys").strings().contains(key)
-            fun label()="${if(enabled()) "✓ " else "○ "}${source.optString("name")}"
-            val button=ui.button(label()) {}.apply { style(this); isSelected=enabled(); gravity=Gravity.CENTER_VERTICAL or Gravity.LEFT }
-            if(index<4) button.nextFocusUpId=when(index) { 0,1 -> server.id; 2 -> pairing.id; else -> connect.id }
-            button.setOnClickListener {
-                backend.request("toggle-source",JSONObject().put("key",key)) { event -> event.optJSONObject("value")?.let {
-                    applyConfig(it); button.text=label(); button.isSelected=enabled(); p.status.text="已启用 ${config.optInt("enabled")} 个片源。按确认键切换，设置自动保存。"
-                } }
-            }
-            sources.addView(button,ui.gridCell(index,4,36).apply { setMargins(ui.px(6),ui.px(5),ui.px(6),ui.px(5)) })
+            navButtons.values.forEach { it.nextFocusRightId=first?.id ?: View.NO_ID }
         }
-        p.content.addView(sources,ui.margins(-1,-2).apply { topMargin=ui.px(11); bottomMargin=ui.px(16) })
-        p.content.addView(ui.text("添加 Apple CMS 片源",17,bold=true),ui.margins(-1,-2).apply { bottomMargin=ui.px(11) })
-        val name=ui.input("名称（可选）").apply { style(this) }
-        val url=ui.input("https://example.com/api.php/provide/vod").apply { style(this); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }
-        val add=ui.button("添加") {
-            backend.request("add-source",JSONObject().put("name",name.text.toString()).put("url",url.text.toString())) { event ->
-                if(event.optString("event")=="error") p.status.text=event.optString("error")
-                else { event.optJSONObject("value")?.let { applyConfig(it) }; p.dialog.dismiss(); showSourceSettings(); toast("片源已添加并启用") }
+        listOf("playback" to "播放","desktop" to "电脑服务","sources" to "片源","add" to "添加片源","subscriptions" to "订阅").forEach { (key,label) ->
+            val button=ui.button(label) { render(key) }.apply {
+                background=ui.focusedBackground(Color.TRANSPARENT,14); gravity=Gravity.CENTER_VERTICAL or Gravity.LEFT
+                setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(15).toFloat()); setPadding(ui.px(18),0,ui.px(18),0); nextFocusLeftId=id
             }
-        }.apply { style(this) }
-        val form=ui.row()
-        form.addView(name,LinearLayout.LayoutParams(0,ui.px(36),1f).apply { rightMargin=ui.px(14) })
-        form.addView(url,LinearLayout.LayoutParams(0,ui.px(36),1f).apply { rightMargin=ui.px(14) }); form.addView(add,ui.margins(-2,36)); p.content.addView(form)
-        p.content.addView(ui.text("导入或更新订阅",17,bold=true),ui.margins(-1,-2).apply { topMargin=ui.px(11); bottomMargin=ui.px(11) })
-        p.content.addView(ui.text("支持 LibreTV SourceList 和 TVBOX 的直连接口；Spider 类订阅暂不支持。",13,ui.muted))
-        val subscription=ui.input("https://example.com/sources.json").apply { style(this); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }
-        var busy=false
-        val syncButtons=mutableListOf<Button>()
-        fun sync(value: String) {
-            if(busy) return
-            busy=true; syncButtons.forEach { it.isEnabled=false }; p.status.text="正在从设备同步订阅…"
-            backend.request("sync-subscription",JSONObject().put("url",value.trim())) { event ->
-                busy=false; syncButtons.forEach { it.isEnabled=true }
-                if(event.optString("event")=="error") p.status.text=event.optString("error")
-                else { p.dialog.dismiss(); backend.request("config") { e -> e.optJSONObject("value")?.let { applyConfig(it); showSourceSettings(); toast("订阅已同步") } } }
-            }
+            val scale=button.onFocusChangeListener
+            button.setOnFocusChangeListener { v,focused -> scale?.onFocusChange(v,focused); if(focused && settingsTab!=key) render(key) }
+            navButtons[key]=button; nav.addView(button,ui.margins(-1,44).apply { bottomMargin=ui.px(4) })
         }
-        val sync=ui.button("同步订阅") { sync(subscription.text.toString()) }.apply { style(this) }; syncButtons.add(sync)
-        val subform=ui.row()
-        subform.addView(subscription,LinearLayout.LayoutParams(0,ui.px(36),1f).apply { rightMargin=ui.px(14) }); subform.addView(sync,ui.margins(-2,36)); p.content.addView(subform,ui.margins(-1,-2).apply { topMargin=ui.px(11) })
-        config.optJSONArray("subscriptions").objects().forEach { sub ->
-            val button=ui.button("更新 ${sub.optString("name").ifEmpty { sub.optString("url") }}") { sync(sub.optString("url")) }.apply { style(this) }
-            syncButtons.add(button); p.content.addView(button,ui.margins(-2,36).apply { topMargin=ui.px(5) })
-        }
-        p.show(); if(focusMode) (if(config.optString("playbackMode")=="desktop") desktop else direct).requestFocus()
+        render(if(navButtons.containsKey(tab)) tab else "playback")
+        p.close.nextFocusDownId=View.NO_ID
+        p.show(); navButtons[settingsTab]?.requestFocus()
     }
     private fun previewSeek(delta: Int) {
         if(!TvPlaybackRules.canSeek(state.optDouble("duration"))) return
@@ -1530,7 +1581,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if (code in setOf(19,20,21,22)) { if(event.action==KeyEvent.ACTION_DOWN) ui.moveFocus(home,code); return true }
         return false
     }
-    fun release() { hot.close(); backend.cancel(compareId); closeDesktopPlayback(); disposed=true; posters.close(); panel?.dialog?.dismiss(); main.removeCallbacksAndMessages(null) }
+    fun release() { hot.close(); backdrop.close(); backend.cancel(compareId); closeDesktopPlayback(); disposed=true; posters.close(); panel?.dialog?.dismiss(); main.removeCallbacksAndMessages(null) }
     /** 搜索结果进入详情页，相关推荐为同一次搜索的其他结果 */
     private fun openSearchDetail(card: JSONObject) = openDetail(card, "搜索结果", related = adapter.cards.filter { it !== card && !it.has("history") })
     private inner class MovieAdapter {

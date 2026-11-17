@@ -27,3 +27,5 @@ android-tv/.emulator.log
 
 android-tv/.web-build/
 .desktop-server/
+android-tv/.preview/
+android-tv/.emulator-phone.log

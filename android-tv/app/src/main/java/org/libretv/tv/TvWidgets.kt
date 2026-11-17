@@ -169,6 +169,23 @@ internal class TvWidgets(val activity: Activity) {
         onFocusChangeListener = View.OnFocusChangeListener { v, focused -> TvMotion.scale(v, if (focused) 1.07f else 1f) }
         setOnClickListener { action() }
     }
+    /** 设置行：左边是名称，右边是当前取值；整行可聚焦，确认键执行 action */
+    class SettingRow(val view: LinearLayout, val value: TextView)
+    fun settingRow(label: String, value: String, action: () -> Unit): SettingRow {
+        val colors = { rest: Int -> ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()), intArrayOf(navy, rest)) }
+        val name = text(label, 15).apply { setTextColor(colors(ink)); isDuplicateParentStateEnabled = true; fontWeight(this, 500) }
+        val current = text(value, 14).apply { setTextColor(colors(muted)); isDuplicateParentStateEnabled = true; gravity = Gravity.RIGHT }
+        val view = row().apply {
+            id = View.generateViewId(); tag = focusTag; isFocusable = true; isFocusableInTouchMode = true
+            background = focusedBackground(radius = 14); focusStyles[this] = TvFocusDecoration.Style(14, false)
+            if (android.os.Build.VERSION.SDK_INT >= 26) defaultFocusHighlightEnabled = false
+            setPadding(px(18), 0, px(18), 0); contentDescription = label
+            addView(name, LinearLayout.LayoutParams(0, -2, 1f)); addView(current, LinearLayout.LayoutParams(-2, -2))
+            onFocusChangeListener = View.OnFocusChangeListener { v, focused -> TvMotion.scale(v, if (focused) 1.02f else 1f) }
+            setOnClickListener { action() }
+        }
+        return SettingRow(view, current)
+    }
     /** 圆形图标按钮（顶栏的搜索、设置） */
     fun iconButton(kind: Int, description: String, action: () -> Unit) = button("", action).apply {
         background = focusedBackground(radius = 20); focusStyles[this] = TvFocusDecoration.Style(20, false)

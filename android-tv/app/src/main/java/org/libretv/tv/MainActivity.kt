@@ -33,6 +33,16 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         // 桌面图标、模拟器和退出重开使用同一套已复刻的电视界面。
         // 旧网页入口仅保留给调试时显式对照，不能因少了预览参数而自动切回。
+        // 手机 / 平板：显示随包分发的手机版界面（与网页端同一套设计），数据由设备直连片源
+        phone = !isTelevision()
+        if (phone) {
+            WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            window.statusBarColor = Color.BLACK; window.navigationBarColor = Color.BLACK
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN)
+            showWebView(); return
+        }
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         if (!(BuildConfig.DEBUG && intent.getBooleanExtra("legacy_web_ui", false))) {
             startActivity(android.content.Intent(this, NativeTvActivity::class.java).apply {
                 addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -44,7 +54,24 @@ class MainActivity : Activity() {
         showWebView()
     }
 
+    private var phone = false
+    private fun isTelevision(): Boolean {
+        val mode = (getSystemService(UI_MODE_SERVICE) as android.app.UiModeManager).currentModeType
+        return mode == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION || packageManager.hasSystemFeature("android.software.leanback")
+            || !packageManager.hasSystemFeature("android.hardware.touchscreen")
+    }
+    // 手机上网页播放器进入全屏：视频层盖住整个窗口并横屏，退出时恢复竖屏
+    private var fullscreenView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
+    private fun exitFullscreen() {
+        fullscreenView?.let { (window.decorView as ViewGroup).removeView(it) }; fullscreenView = null
+        fullscreenCallback?.onCustomViewHidden(); fullscreenCallback = null
+        @Suppress("DEPRECATION") run { window.decorView.systemUiVisibility = 0 }
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+
     private fun hideSystemBars() {
+        if (phone && fullscreenView == null) return
         @Suppress("DEPRECATION")
         run {
             window.decorView.systemUiVisibility =
@@ -77,7 +104,7 @@ class MainActivity : Activity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun showWebView() {
-        val url = "${localOrigin()}/tv"
+        val url = if (phone) "${localOrigin()}/" else "${localOrigin()}/tv"
         try {
             val cookies = CookieManager.getInstance()
             cookies.setAcceptCookie(true)
@@ -88,9 +115,20 @@ class MainActivity : Activity() {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
-                settings.userAgentString = "${settings.userAgentString} LibreTV-AndroidTV/0.3"
+                settings.userAgentString = "${settings.userAgentString} ${if (phone) "SuperTV-Android" else "LibreTV-AndroidTV/0.3"}"
                 cookies.setAcceptThirdPartyCookies(this, true)
-                webChromeClient = WebChromeClient()
+                webChromeClient = object : WebChromeClient() {
+                    override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+                        if (!phone) { callback.onCustomViewHidden(); return }
+                        exitFullscreen()
+                        fullscreenView = view; fullscreenCallback = callback
+                        view.setBackgroundColor(Color.BLACK)
+                        (window.decorView as ViewGroup).addView(view, ViewGroup.LayoutParams(-1, -1))
+                        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        hideSystemBars()
+                    }
+                    override fun onHideCustomView() { if (fullscreenView != null) exitFullscreen() }
+                }
                 webViewClient = object : WebViewClient() {
                     override fun onPageStarted(view: WebView, nextUrl: String, favicon: Bitmap?) {
                         nativePlayer?.stop()
@@ -99,7 +137,7 @@ class MainActivity : Activity() {
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                         if (!request.isForMainFrame) return false
                         val path = request.url.path?.trimEnd('/')
-                        return standalone?.sameOrigin(request.url) != true || path !in setOf("", "/tv", "/watch")
+                        return standalone?.sameOrigin(request.url) != true || path !in (if (phone) setOf("", "/watch", "/library") else setOf("", "/tv", "/watch"))
                     }
                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                         standalone?.intercept(request)
@@ -117,11 +155,22 @@ class MainActivity : Activity() {
                 requestFocus()
             }
             val currentWeb = webView ?: return
-            standalone = StandaloneHost(this, currentWeb, localOrigin())
-            nativePlayer = NativePlayerHost(this, currentWeb, url)
-            setContentView(nativePlayer!!.container.apply {
-                addView(currentWeb, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            })
+            standalone = StandaloneHost(this, currentWeb, localOrigin(), phone)
+            if (phone) {
+                // 手机用网页播放器；系统栏和输入法占掉的区域留出来，其余铺满
+                currentWeb.setBackgroundColor(Color.rgb(8, 8, 8))
+                val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK); addView(currentWeb, FrameLayout.LayoutParams(-1, -1)) }
+                root.setOnApplyWindowInsetsListener { v, insets ->
+                    @Suppress("DEPRECATION") v.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+                    insets
+                }
+                setContentView(root)
+            } else {
+                nativePlayer = NativePlayerHost(this, currentWeb, url)
+                setContentView(nativePlayer!!.container.apply {
+                    addView(currentWeb, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                })
+            }
             currentWeb.loadUrl(url)
         } catch (error: Exception) {
             showLocalError("无法启动内置浏览器（${error.javaClass.simpleName}），请检查 Android System WebView 是否已启用。")
@@ -134,6 +183,7 @@ class MainActivity : Activity() {
             return true
         }
         val currentWebView = webView
+        if (keyCode == KeyEvent.KEYCODE_BACK && fullscreenView != null) { currentWebView?.evaluateJavascript("document.exitFullscreen&&document.exitFullscreen()", null); exitFullscreen(); return true }
         if (keyCode == KeyEvent.KEYCODE_BACK && currentWebView != null) {
             currentWebView.evaluateJavascript("Boolean(document.querySelector('[role=dialog]:not([data-tv-auth])'))") { hasDialog ->
                 if (hasDialog == "true") {
@@ -154,6 +204,7 @@ class MainActivity : Activity() {
      * 这一层截获，才能可靠地把投影仪遥控器交给网页的电视模式导航。
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (phone) return super.dispatchKeyEvent(event)
         // 播放页有自己的遥控器状态机，方向键用于进度/面板，不能走首页空间导航。
         val currentUrl = webView?.url?.let { Uri.parse(it) }
         if (currentUrl?.path == "/watch" && currentUrl.getQueryParameter("tv") == "1") {

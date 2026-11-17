@@ -26,7 +26,7 @@ import javax.crypto.spec.SecretKeySpec
 /** APK 内置页面 + 有界的原生 HTTP 桥。虚拟 origin 沿用旧安装，保留 WebView 历史和设置。
  * 没有本地监听端口；该 origin 的所有资源请求都在这里处理，绝不回落到旧电脑服务。
  */
-internal class StandaloneHost(private val activity: Activity, private val web: WebView, private val origin: String) {
+internal class StandaloneHost(private val activity: Activity, private val web: WebView, private val origin: String, private val phone: Boolean = false) {
     private class Job {
         @Volatile var connection: HttpURLConnection? = null
         @Volatile var future: Future<*>? = null
@@ -84,7 +84,10 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
         if (path == "/api/proxy") {
             // 封面走设备原生网络，避免旧 WebView 的跨域和混合内容限制。
             return try {
-                val data = fetch(JSONObject().put("url", request.url.getQueryParameter("url")).put("maxBytes", 4 * 1024 * 1024), Job())
+                val target = request.url.getQueryParameter("url").orEmpty()
+                // 豆瓣图床校验来路
+                val headers = JSONObject().apply { if (Uri.parse(target).host.orEmpty().endsWith("doubanio.com")) put("Referer", "https://movie.douban.com/") }
+                val data = fetch(JSONObject().put("url", target).put("headers", headers).put("maxBytes", 4 * 1024 * 1024), Job())
                 val status = data.getInt("status")
                 WebResourceResponse(data.getJSONObject("headers").optString("Content-Type", "image/jpeg").substringBefore(';'), null,
                     status, if (status in 200..299) "OK" else "Upstream Error", mapOf("Cache-Control" to "max-age=3600"),
@@ -93,10 +96,12 @@ internal class StandaloneHost(private val activity: Activity, private val web: W
         }
         if (path.startsWith("/api/")) return response(404, "Not Found", "本地接口不可用")
         val name = when (path) {
-            "", "/", "/tv", "/tv/" -> "tv.html"
+            "", "/" -> if (phone) "index.html" else "tv.html"
+            "/tv", "/tv/" -> "tv.html"
             "/watch", "/watch/" -> "watch.html"
             "/native-tv", "/native-tv/" -> "native-tv.html"
-            else -> path.removePrefix("/")
+            // 手机界面的其余页面（/library 等）：静态导出的同名 html
+            else -> path.removePrefix("/").trimEnd('/').let { if (phone && !it.substringAfterLast('/').contains('.')) "$it.html" else it }
         }
         if (name.split('/').any { it == ".." || it == "." } || name.contains('\\')) return response(403, "Forbidden", "")
         return try {
