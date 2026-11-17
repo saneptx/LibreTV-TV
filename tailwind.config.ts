@@ -2,7 +2,7 @@ import type { Config } from 'tailwindcss';
 
 /**
  * 语义化颜色 token：全部通过 CSS 变量驱动，支持亮暗主题切换。
- * 深色主题默认启用，沿用旧版 LibreTV（backup-2025）赛博配色并整体调深一档（#0b101a 页面 / #141c29 面板 / #0d141f 卡片 / #00ccff 霓虹蓝主色）。
+ * 深色主题默认启用：黑白灰简约风格，与电视端 SuperTV 统一（纯黑底、灰阶层次、白色强调）。
  */
 const config: Config = {
   darkMode: 'class',

@@ -49,9 +49,9 @@ export function useSourceTests() {
 
 export function SectionTitle({ title, hint, extra }: { title: string; hint?: string; extra?: ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-2 mb-2.5">
+    <div className="flex items-center justify-between gap-2 mb-2.5 px-1">
       <div className="min-w-0">
-        <h3 className="text-sm font-semibold text-content">{title}</h3>
+        <h3 className="text-[13px] font-medium tracking-wide text-muted">{title}</h3>
         {hint && <p className="text-[11px] text-faint truncate">{hint}</p>}
       </div>
       {extra}
@@ -71,10 +71,10 @@ export function ToggleRow({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-0.5">
+    <div className="settings-row flex items-center justify-between gap-4">
       <div className="min-w-0">
-        <div className="text-sm text-content">{label}</div>
-        <div className="text-xs text-faint">{description}</div>
+        <div className="text-[15px] text-content">{label}</div>
+        <div className="text-xs text-faint mt-0.5 leading-relaxed">{description}</div>
       </div>
       <Switch checked={checked} onChange={onChange} label={label} />
     </div>
@@ -100,16 +100,16 @@ export function Switch({
       aria-label={label}
       title={title ?? label}
       className={cn(
-        'relative h-[22px] w-10 shrink-0 rounded-full transition-colors duration-200',
+        'relative h-7 w-12 shrink-0 rounded-full transition-colors duration-200',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
-        checked ? 'bg-accent' : 'bg-chip ring-1 ring-inset ring-line'
+        checked ? 'bg-accent' : 'bg-hover'
       )}
       onClick={() => onChange(!checked)}
     >
       <span
         className={cn(
-          'absolute left-[2px] top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-transform duration-200 ease-out',
-          checked ? 'translate-x-[18px]' : 'translate-x-0'
+          'absolute left-[3px] top-[3px] h-[22px] w-[22px] rounded-full shadow transition-transform duration-200 ease-out',
+          checked ? 'translate-x-5 bg-on-accent' : 'translate-x-0 bg-white'
         )}
       />
     </button>
@@ -136,10 +136,10 @@ export function SelectRow({
   description?: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-0.5">
+    <div className="settings-row flex items-center justify-between gap-4">
       <div className="min-w-0">
-        <div className="text-sm text-content">{label}</div>
-        {description && <div className="text-xs text-faint">{description}</div>}
+        <div className="text-[15px] text-content">{label}</div>
+        {description && <div className="text-xs text-faint mt-0.5 leading-relaxed">{description}</div>}
       </div>
       <Dropdown
         value={value}

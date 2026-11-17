@@ -188,9 +188,16 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 3 * 1024 * 1024) throw failure(413, '请求过大'); }
         let input; try { input = JSON.parse(body); } catch { throw failure(400, '请求格式无效'); }
+        // 按片库条目播放（网页「已下载」）：地址和处理设置取自下载时的记录，片源失效或断网也能看
+        let stored;
+        if (input && input.download !== undefined) {
+          await libraryReady; stored = typeof input.download === 'string' ? library?.get(input.download) : undefined;
+          if (!stored || stored.state !== 'done') throw failure(404, '下载不存在或尚未完成');
+          input = { ...stored.input, position: input.position };
+        }
         if (!input || typeof input.url !== 'string' || input.superResolution !== undefined && typeof input.superResolution !== 'boolean' || input.position !== undefined && (!Number.isFinite(input.position) || input.position < 0)
           || !validPlaylists(input.playlists) || !validLines(input.adSegments) || !validDecoders(input.decoders) || input.overlayRemoval !== undefined && typeof input.overlayRemoval !== 'boolean') throw failure(400, '播放参数无效');
-        await destination(input.url);
+        if (!stored) await destination(input.url);
         if (sessions.size >= 8) throw failure(429, '电脑服务的播放任务已满');
         const headers = {};
         for (const [key, value] of Object.entries(input.headers || {})) {

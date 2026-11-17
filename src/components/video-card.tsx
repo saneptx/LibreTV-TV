@@ -149,8 +149,8 @@ export function AggregatedCard({
             </h3>
             <div className="flex flex-wrap gap-1 mb-1.5">
               {group.typeName && <span className="tag bg-accent/15 text-accent">{group.typeName}</span>}
-              {group.year && <span className="tag bg-purple-500/15 text-purple-600 dark:text-purple-300">{group.year}</span>}
-              {adult && <span className="tag bg-pink-500/15 text-pink-600 dark:text-pink-400">(18+)</span>}
+              {group.year && <span className="tag bg-chip text-muted">{group.year}</span>}
+              {adult && <span className="tag bg-chip text-muted">(18+)</span>}
               {/* 单源卡片没有展开列表，画质只能在这里露出；失败态可点重试 */}
               {singleKey && (
                 <QualityBadge
@@ -220,8 +220,10 @@ export function AggregatedCard({
             单列全宽行：两列在卡片实际宽度（约 330px）下每列只剩 148px，
             源名必截断，且源数为奇数时必然留半行空。一行内「源名 / 画质 / 集数 / 播放」
             四段排开，信息密度更高也更容易纵向扫读。
+            来源多时（几十个）不把卡片撑得很长：最多露出六行半，其余用滚轮 / 触摸在列表内滚动，
+            露半行是为了让人看出下面还有；滚到头不带动整页（overscroll-contain）。
           */}
-          <div className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5 max-h-[17.5rem] overflow-y-auto overscroll-contain scrollbar-thin p-0.5 -m-0.5 pr-1">
             {sortedItems.map((item) => {
               const itemKey = qualityKey(item.sourceKey, item.vodId);
               const label = compactRemarks(item.remarks);
@@ -237,7 +239,7 @@ export function AggregatedCard({
                     'bg-chip hover:border-accent hover:bg-accent/10',
                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
                     isBest ? 'border-accent/50' : 'border-line',
-                    item.isAdult && 'border-pink-500/30'
+                    item.isAdult && 'border-line'
                   )}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -331,7 +333,7 @@ export function VideoCard({ item, onClick }: { item: SearchResultItem; onClick: 
             </h3>
             <div className="flex flex-wrap gap-1 mb-1.5">
               {item.typeName && <span className="tag bg-accent/15 text-accent">{item.typeName}</span>}
-              {item.year && <span className="tag bg-purple-500/15 text-purple-600 dark:text-purple-300">{item.year}</span>}
+              {item.year && <span className="tag bg-chip text-muted">{item.year}</span>}
             </div>
             <p className="text-xs text-muted line-clamp-2 mb-2">{formatRemarks(item.remarks) || '暂无介绍'}</p>
           </div>
@@ -353,7 +355,7 @@ export function DoubanCard({ item, onClick }: { item: { title: string; cover: st
 
   return (
     <div
-      className="card cursor-pointer hover:scale-[1.03] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      className="group/card cursor-pointer focus-visible:outline-none"
       role="button"
       tabIndex={0}
       onClick={onClick}
@@ -365,7 +367,7 @@ export function DoubanCard({ item, onClick }: { item: { title: string; cover: st
         }
       }}
     >
-      <div className="relative aspect-[2/3] bg-chip">
+      <div className="relative aspect-[2/3] rounded-2xl overflow-hidden bg-chip ring-0 ring-accent transition-all duration-200 group-hover/card:ring-2 group-hover/card:scale-[1.03] group-focus-visible/card:ring-2">
         {item.cover && !imgFailed ? (
           <SmartImage
             url={item.cover}
@@ -383,13 +385,13 @@ export function DoubanCard({ item, onClick }: { item: { title: string; cover: st
           </div>
         )}
         {item.rating && (
-          <span className={cn('absolute top-1.5 right-1.5 tag bg-black/70 text-rating font-medium')}>
-            ★ {item.rating}
+          <span className="absolute top-2 left-2 rounded-full bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur-sm">
+            豆瓣 {item.rating}
           </span>
         )}
       </div>
-      <div className="p-2">
-        <div className="text-xs font-medium text-content truncate" title={item.title}>
+      <div className="pt-2.5">
+        <div className="text-sm font-medium text-content truncate" title={item.title}>
           {item.title}
         </div>
       </div>

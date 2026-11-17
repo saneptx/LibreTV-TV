@@ -218,9 +218,15 @@ export const api = {
 
   /** 影视热榜（60s API 免 key）：豆瓣周榜五个类目 + 百度热播剧 */
   hotList: (id: string, signal?: AbortSignal) => {
+    if (getNativeHttpBridge()) return import('./standalone-api').then((m) => m.standaloneHotList(id, signal));
     const sp = new URLSearchParams({ id });
     return request<DoubanResponse>(`/api/hot-list?${sp.toString()}`, { signal });
   },
+
+  /** 主推大图的横版剧照；没有时为 null */
+  backdrop: (id: string, isTv: boolean, signal?: AbortSignal) => getNativeHttpBridge()
+    ? import('./standalone-api').then((m) => m.standaloneBackdrop(id, isTv, signal))
+    : request<{ backdrop: string | null }>(`/api/hot-list/backdrop?id=${encodeURIComponent(id)}${isTv ? '&tv=1' : ''}`, { signal }),
 
   /** 换源：按标题跨源搜索并取详情，附带接口耗时（测速）；支持 signal 以便关闭弹窗时中止在途请求 */
   detailSpeed: async (id: string, source: SourceConfig, signal?: AbortSignal, opts?: { forceRefresh?: boolean }) => {

@@ -128,3 +128,8 @@ test('取消单个处理分片可终止尚未收到响应头的源站请求',asy
   assert(seen.some(r=>r.path==='headers-closed'));await fetch(base+'/v1/sessions/'+session.id,{method:'DELETE',headers});
  }finally {app.closeSessions();await new Promise(r=>{app.server.close(r);app.server.closeAllConnections();});}
 });
+test('按下载条目播放：条目不存在或没有片库时返回 404', async () => {
+  for (const download of ['a'.repeat(32), '', 5, null]) {
+    const res=await request('/v1/sessions',{method:'POST',body:JSON.stringify({download})}); assert.equal(res.status,404,String(download));
+  }
+});
