@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
-  <!-- SuperTV 标志，与电视端 android-tv/app/src/main/res/drawable/tv_icon.xml 同一图形：一束光里的白色播放三角 -->
-  <rect width="108" height="108" fill="#000"/>
-  <path fill="#fff" fill-opacity=".10" d="M0,47L108,8V100L0,61z"/>
-  <path fill="#fff" fill-opacity=".14" d="M0,50L108,24V84L0,58z"/>
-  <path fill="#fff" fill-opacity=".20" d="M0,52.5L108,40V68L0,55.5z"/>
-  <path fill="#fff" stroke="#fff" stroke-width="9" stroke-linejoin="round" d="M41,32V76L80,54z"/>
-</svg>

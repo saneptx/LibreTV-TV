@@ -134,13 +134,6 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
   }
   const send = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
   const server = http.createServer(async (req, res) => {
-    // The APK uses its native HTTP bridge; these origins also allow local browser development.
-    if (['http://127.0.0.1:8080', 'http://localhost:8080'].includes(req.headers.origin)) {
-      res.setHeader('Access-Control-Allow-Origin', req.headers.origin); res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, DELETE, OPTIONS');
-      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-    }
     let abandoned;
     try {
       const path = new URL(req.url, 'http://desktop.local').pathname;
@@ -208,7 +201,7 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 3 * 1024 * 1024) throw failure(413, '请求过大'); }
         let input; try { input = JSON.parse(body); } catch { throw failure(400, '请求格式无效'); }
-        // 按片库条目播放（网页「已下载」）：地址和处理设置取自下载时的记录，片源失效或断网也能看
+        // 按片库条目播放（电脑端「电脑片库」）：地址和处理设置取自下载时的记录，片源失效或断网也能看
         let stored;
         if (input && input.download !== undefined) {
           await libraryReady; stored = typeof input.download === 'string' ? library?.get(input.download) : undefined;

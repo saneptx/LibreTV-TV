@@ -13,7 +13,7 @@ APK 0.4.2 在原来的「片源管理」面板增加两种播放模式，首页�
 
 ## 启动服务
 
-Node.js 22.16+，当前默认环境为 Ubuntu 24 x64、支持 Vulkan 的 NVIDIA GPU、FFmpeg 6+（含 libplacebo 和 h264_nvenc）。本机已验证 RTX 3060 Laptop。无新增 npm 依赖，不需要启动旧 Next.js 服务。服务单独使用 8090。
+Node.js 22.16+，当前默认环境为 Ubuntu 24 x64、支持 Vulkan 的 NVIDIA GPU、FFmpeg 6+（含 libplacebo 和 h264_nvenc）。本机已验证 RTX 3060 Laptop。没有 npm 依赖。服务单独使用 8090。
 
 ```bash
 # 下载校验模型；必要时将 Ubuntu FFmpeg 解包到项目目录，不修改系统软件
@@ -38,19 +38,18 @@ npm run desktop:server -- --host 0.0.0.0
 
 ## Windows 运行
 
-已在 Windows 11 + RTX 3060 Laptop + Node.js 26 上验证。需要 NVIDIA 显卡和已安装的 Node.js 22.16+。
+已在 Windows 11 + RTX 3060 Laptop 上验证。日常使用装 SuperTV 电脑端（`desktop/`）即可：它自带 Node.js 和本服务，打开程序就在后台启动串流服务，在「设置 → 串流服务」里查看电视配对码、切换处理方式、下载超分工具、选择下载位置；关闭窗口后可以留在托盘里继续为电视服务。数据放在 `%LOCALAPPDATA%\SuperTV`（由环境变量 `SUPERTV_HOME` 传给服务）。
 
-双击项目根目录的 `start_windows.cmd`，或在终端执行：
+不装电脑端、直接用命令行时（需要 Node.js 22.16+）：
 
 ```bash
-node start_all.mjs
+npm run desktop:setup
+npm run desktop:server -- --host 0.0.0.0
 ```
 
-脚本依次安装依赖、构建网页、准备串流环境，然后同时启动网页服务（8080）和电脑串流服务（8090，监听局域网）。`--no-stream` 只启动网页；`--no-build` 跳过网页构建。Linux / macOS 也可使用同一脚本（macOS 没有 NVENC，请加 `--no-stream`）。
-
 - **FFmpeg**：超分需要 libplacebo。系统 FFmpeg 没有该滤镜时（例如 essentials 精简版），`desktop:setup` 会下载校验 FFmpeg 7.1.1 完整版并解包到 `.desktop-server/tools/ffmpeg`，不修改系统已安装的软件。
-- **防火墙**：电视 / 手机要从局域网访问，需在 Windows 防火墙放行 TCP 8080 和 8090。以管理员身份执行一次：`netsh advfirewall firewall add rule name="LibreTV" dir=in action=allow protocol=TCP localport=8080,8090 profile=private`。
-- **代理 Fake-IP**：检测到 198.18.0.0/15 的代理虚拟网卡时，启动脚本自动为串流服务加上 `--allow-fake-ip`。
+- **防火墙**：电视要从局域网访问，需要放行 TCP 8090。第一次启动时 Windows 会弹出提示，选「允许」即可；或以管理员身份执行一次：`netsh advfirewall firewall add rule name="SuperTV" dir=in action=allow protocol=TCP localport=8090 profile=private`。
+- **代理 Fake-IP**：本机代理把片源域名解析到 198.18.0.0/15 时，加 `--allow-fake-ip`（电脑端会自动判断）。
 - **暂不支持**：高质量模式（`--quality`，Real-ESRGAN）的自动配置；默认的 FSRCNNX 超分、去广告、去水印、多来源比对和电脑片库均可用。
 
 验证命令与 Linux 相同：`npm run desktop:test`、`npm run desktop:check`，以及 `node desktop-server/check-overlay.mjs`、`check-compare.mjs`、`check-pipeline.mjs`。
@@ -61,10 +60,11 @@ node start_all.mjs
 
 | 设备 | 如何接入 |
 | --- | --- |
-| 电视 / 投影仪 App | 「片源管理」里填好电脑地址和配对码即可，与播放模式无关（独立直连时也同步） |
-| 电脑、手机浏览器 | 打开这台电脑的网页（8080）即可，无需填写配对码：网页服务用本机的配对码经 `/api/sync` 代为转发 |
+| 电视 / 投影仪 | 「设置 → 电脑服务」里选中自动发现的电脑，输入电脑端显示的 6 位配对码（与播放模式无关，独立直连时也同步） |
+| SuperTV 电脑端 | 自动接上本机的串流服务 |
+| 手机 | 不直接连电脑：与连接的电视同步，再由电视与电脑同步 |
 
-浏览器端启动时同步一次，本机有修改约 3 秒后推送，之后每分钟拉取一次。网页开启了访问验证时，登录后才会同步。网页服务与串流服务不在同一目录或同一台电脑时，用环境变量 `DESKTOP_SERVER_URL`、`DESKTOP_PAIRING_TOKEN` 指定。协议：`POST /v1/sync`，见 `sync.mjs`。
+协议：`POST /v1/sync`，见 `sync.mjs`。
 
 ## 模拟器固定测试源
 
@@ -87,12 +87,10 @@ npm run desktop:server -- --allow-test-origin http://127.0.0.1:8091
 
 测试前备份设备的完整片源勾选，结束时恢复并用普通片名复查，不能把“仅启用测试源”的配置留作日常使用。两种播放模式共用片源勾选；搜索和详情由设备完成，只有开始播放后才连接电脑。电脑服务没有配置或离线，也不应阻止搜索。
 
-验证内容：搜索选片、画面实际渲染、服务流量增加、HLS/MP4 换集、暂停/快进/倍速/画面比例、换集后单一任务、服务中断后提示及直连恢复。可在播放时运行现有遥控器回归：
+验证内容：搜索选片、画面实际渲染、服务流量增加、HLS/MP4 换集、暂停/快进/倍速/画面比例、换集后单一任务、服务中断后提示及直连恢复。自动测试：
 
 ```bash
-node android-tv/scripts/check-native-playback.mjs --report /tmp/libretv-desktop-controls-report.json
 npm run desktop:test
-npm test
 ```
 
 服务端测试还覆盖代理 Fake-IP 的显式放行边界、任务超时清理和 DNS 固定地址；并覆盖配对、主/子列表与音轨/密钥/初始化片段重写、上游凭证隔离、Range/HEAD、任务删除、私网限制。真实设备和当前网络片源仍需在模拟器测试通过后另行验证；本阶段不更新投影仪。

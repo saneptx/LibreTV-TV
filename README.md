@@ -1,390 +1,98 @@
-# LibreTV
+# SuperTV
 
-LibreTV-TV：在 LibreTV Next.js 迁移版基础上，增加 Android TV / 投影仪独立 App、原生电视界面与可选的电脑增强串流。网页端基于 Next.js 15（App Router）+ TypeScript + Tailwind CSS，使用 ArtPlayer + hls.js；Android 端使用 Media3 解码播放。
+SuperTV 是一套家用影视聚合播放器：聚合公开的 Apple CMS 采集站，搜索、选集、去插播广告、记住观看进度，并在家里的设备之间同步。三端都是原生应用，界面统一为黑白灰简约风格、同一个标志：
 
-当前 Android APK 版本为 **0.8.6**（电视端应用显示名为 SuperTV），网页版本为 **2.19.6**。电视使用与启动方法见下方 [Android TV / 投影仪](#android-tv--投影仪)。
-
-> 🏠 **官网**：[LibreTV 官网](https://libretv.is-an.org/)
->
-> 🌐 **演示站**：[tv.bagiinlink.eu.org](https://tv.bagiinlink.eu.org)（访问密码：`libretv`）
->
-> 📖 **完整文档**：[文档首页](https://libretv.is-an.org/wiki/) · [架构](https://libretv.is-an.org/wiki/Architecture.html) · [部署](https://libretv.is-an.org/wiki/Deployment.html) · [配置](https://libretv.is-an.org/wiki/Configuration.html) · [数据源](https://libretv.is-an.org/wiki/Data-Sources.html) · [直播 / IPTV](https://libretv.is-an.org/wiki/Live-IPTV.html) · [首页推荐](https://libretv.is-an.org/wiki/Recommendations.html) · [播放器](https://libretv.is-an.org/wiki/Player.html) · [代理与安全](https://libretv.is-an.org/wiki/Proxy-Security.html) · [FAQ](https://libretv.is-an.org/wiki/FAQ.html)
->
-
-<p align="center">
- <a href="https://trendshift.io/repositories/26551?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26551" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26551" alt="LibreSpark%2FLibreTV | Trendshift" width="250" height="55"/></a> <a href="https://trendshift.io/repositories/26551?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-26551" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/26551/weekly?language=JavaScript" alt="LibreSpark%2FLibreTV | Trendshift" width="250" height="55"/></a>
-</p>
-
-## 核心特性
-
-- **聚合搜索**：多采集站服务端并行搜索
-- **跨源同名聚合**：同名影片合并为一张卡片，展开即可比较和选择各来源
-- **HLS 播放**：ArtPlayer + hls.js，广告分片过滤、自动连播、倍速、快捷键、移动端长按 3 倍速
-- **直播 / IPTV**：M3U 订阅解析，`/live` 页面按分组浏览、搜索频道并站内播放（HLS + HTTP-FLV），支持 XMLTV 节目单（EPG）与频道收藏；直播流经专用长连接代理（`/api/live/stream`）转发
-- **进度同步**：播放进度与观看历史存于本机 IndexedDB，精确到秒的续播
-- **换源测速**：跨源搜索同名资源并测速排序，一键切换保留集数位置
-- **源测试与订阅**：一键探活点播源与直播源（支持批量测活）；搜索时自动记录各源健康度，连续失败的源按阶梯时长自动停用（30 分钟 → 24 小时 → 长期），可一键恢复；订阅远程源列表（一份 LibreTV-SourceList JSON 可同时下发点播源与直播源，也可直接填 TVBOX 配置地址，自动导入其中可直接使用的接口），可导出分享
-- **首页推荐**：豆瓣（电影/剧集分类浏览）、Bangumi 新番放送表或影视榜单（豆瓣周榜 + 百度热播，经 60s API），设置中切换；均服务端直连 + 缓存，Bangumi/榜单免 key 免配置（`60S_API_BASE` 可指向自部署 60s 实例）
-- **PWA**：可安装到桌面 / 主屏幕，亮暗双主题无首屏闪烁
-
-## 本分支的 TV / 投影仪改动
-
-- **独立运行**：界面随 APK 打包，设备直接搜索片源、获取详情和播放，无需电脑服务器，也无需 App 登录密码。片源、搜索历史和观看进度保存在设备本地，覆盖安装可保留数据。
-- **原生电视操作**：首页、选集、换源、设置与播放器使用 Android 控件和 Media3，沿用原有界面与遥控器逻辑；支持透明缓冲提示和实时接收网速。搜索、解析及 IndexedDB 暂由包内不可见的数据页复用，语音输入仍待实现。
-- **可选电脑串流**：仍在 App 内搜索、选片，开始播放后由电脑读取片源，过滤明确标记的广告分片、超分、编码，再将 HLS 发送给电视。最终解码和显示仍在电视 / 投影仪上。
-- **超分开关与标注**：开启后默认只升一档，例如 720P → 1080P、1080P → 4K，已有 4K 保持；关闭后保留原始分辨率，广告过滤独立控制。播放页标注原始/输出尺寸、实际超分状态及实际删除的广告分片数量。
-- **搜索与换源缓存**：设备搜索结果缓存 10 分钟，换源结论缓存 5 分钟并持久化；过期换源列表先显示缓存再后台刷新，也可手动“刷新来源”。换源按原始分辨率优先排序，更新结果时保留所选来源和焦点。
-- **0.4.4–0.4.5 界面修复**：统一桌面与模拟器启动入口；换源左右栏独立滚动，修复来源较多时卡片、焦点光晕覆盖页脚，以及最后一项底边被裁切的问题。
-- **0.5.0 去广告三阶段**：①插入的广告分片按编码比对、重复插入和遥控器「标记广告」学习自动删除；②配置电脑服务后，自动用同一集的其他来源做音频比对，定位并跳过与正片编在一起的广告；③电脑串流时识别固定台标/水印和滚动广告字幕并抹除，对白字幕不受影响。详见 [Android 说明](android-tv/README.md)。
-- **0.4.7 历史观看**：首页按最近观看展示影片，显示上次集数和进度；确认后继续播放，已看完可从头重播。顶部“历史观看”可从搜索结果返回列表，记录保存在设备本地。
-- **0.4.6 串流缓冲优化**：下载与 GPU 编码重叠，默认 8 秒分段减少工具启动次数；音画合并编码，先准备约 8 秒视频并向前预取，快进分片优先处理，限制编码码率峰值。分辨率仍默认升一档，首次播放可能多等待几秒。参数与验证见 [电脑串流说明](desktop-server/README.md)。
-
-电脑去广告目前只处理可识别的 HLS 广告分片，不处理画面内嵌广告、台标或水印。4K 处理速度取决于片源、帧率、显卡和网络，不能保证所有视频实时播放。
-
-| 使用方式 | 电脑需要运行什么 | 设备上的操作 |
+| 端 | 位置 | 说明 |
 | --- | --- | --- |
-| App 独立直连（默认） | 无需电脑服务 | 安装 APK，直接搜索播放 |
-| App 电脑串流 | 8090 电脑串流服务 | 片源管理 → 填写电脑地址与配对码 → 电脑串流 |
-| 电脑浏览器 | 8080 Next.js 网页服务 | 浏览器打开 `http://localhost:8080` |
+| 电视 / 投影仪 | [`android-tv/`](android-tv/README.md) | Android 原生遥控器界面，Media3 播放。可连接电脑，由电脑显卡去广告、AI 超分后串流给电视 |
+| 手机 | [`android-tv/`](android-tv/README.md)（同一个 APK） | 原生触屏界面，自己直连片源看片；也是电视的伴侣：发现电视、同步、投屏接力、遥控、代替遥控器打字 |
+| 电脑 | [`desktop/`](desktop/README.md) | Compose Desktop 程序（Windows / macOS），libVLC 播放；同时运行给电视用的串流服务 |
+| 串流服务 | [`desktop-server/`](desktop-server/README.md) | Node.js 服务，电脑端自动启动：去广告、FSRCNNX 超分、NVENC 编码、局域网同步中枢、电脑片库 |
 
-Windows（NVIDIA 显卡）可双击 `start_windows.cmd` 同时启动网页服务与电脑串流服务，见[电脑串流说明](desktop-server/README.md#windows-运行)。
+三端共用同一套 Kotlin 数据层 [`android-tv/core`](android-tv/core)：片源解析、去广告判定、资料库、同步、订阅都只有这一份实现。
 
-详细实现与验证见 [Android TV 说明](android-tv/README.md)、[播放协议](android-tv/PLAYBACK_PROTOCOL.md)、[界面迁移记录](android-tv/NATIVE_UI_MIGRATION.md)及[电脑串流说明](desktop-server/README.md)。以下 Docker / 网页部署说明仍适用于网页端。
+## 设备之间怎么配合
 
-## 部署
+- **电视 / 投影仪**屏幕大，需要时连接电脑：在「设置 → 电脑服务」里选中自动发现的电脑，输入电脑端显示的 6 位配对码。
+- **手机**不连电脑、不做超分：自己直连片源看片，并自动发现局域网里的电视（第一次连接要在电视上确认），与电视同步、把正在看的内容接力到电视上播放。
+- **电脑**运行串流服务，作为局域网里的同步中枢：观看历史、各集进度、搜索记录、片库收藏按修改时间合并，删除也同步。只在家里的局域网内同步，不经过任何云服务。
 
-### Docker（推荐）
+## 构建
 
-```bash
-# 在 .env 中设置 PASSWORD
-echo "PASSWORD=your-password" > .env
+### 安卓（手机 + 电视）
 
-# 方式一：拉取发布镜像（零构建）
-docker compose pull && docker compose up -d
-
-# 方式二：源码构建
-docker compose up -d --build
-```
-
-### Docker Compose
-
-```yaml
-services:
-  libretv:
-    image: ghcr.io/librespark/libretv:latest
-    container_name: libretv
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      - PASSWORD=change-me   # 必填：访问密码，务必修改
-      # - PROXY_SECRET=your-secret          # 会话/代理签名密钥，多实例部署建议设置
-      # - DEFAULT_SOURCES=[{"name":"示例源","url":"https://example.com/api.php/provide/vod"}]
-      # - DEFAULT_LIVE_SOURCES=[{"name":"示例直播源","url":"https://example.com/list.m3u"}]
-      # - DEFAULT_SUBSCRIPTIONS=["https://example.com/sources.json"]  # 预置订阅，自动导入点播源+直播源
-      # - DEFAULT_RECOMMEND_SOURCE=douban  # 首页推荐数据源默认值（douban/bangumi/hot-list），仅对未主动选择过的用户生效
-      # - LIVE_ALLOW_PRIVATE=1              # 自建内网 IPTV 源时开启
-```
-
-> 其余可选变量见下方[环境变量](#环境变量)表；仓库内的 `docker-compose.yml` 含完整注释版本（含 `build: .` 源码构建分支）。
+需要 JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0（`ANDROID_HOME` 或 `android-tv/local.properties` 的 `sdk.dir`）。
 
 ```bash
-docker compose pull && docker compose up -d
-```
-
-> ⚠️ **生产部署必须通过 HTTPS 访问**（localhost 除外）：生产模式下会话 cookie 带 `Secure` 标记，浏览器只在 HTTPS（或 localhost）下保存它。因此用 `http://服务器IP:端口` 访问时，会出现"密码正确却无法登录"的现象——登录请求实际成功，但 cookie 被浏览器丢弃。请通过反向代理（Nginx / Caddy / Traefik）或 Cloudflare 等为站点套上 TLS 后再对外提供服务；本地开发用 `localhost` 不受影响。
-
-镜像发布在 GHCR 与 Docker Hub：`ghcr.io/librespark/libretv` 与 `docker.io/bestzwei/libretv`
-（`latest` / `主.次` / 完整版本号三个 tag，`linux/amd64` 与 `linux/arm64` 双架构，
-两个 registry 的镜像 digest 一致）。需要固定版本时在 `.env` 中设置
-`LIBRETV_IMAGE=ghcr.io/librespark/libretv:2.0.1`。
-
-> 网页服务的版本号以 `package.json` 为来源，部署后可用 `/api/status` 返回的 `version` 字段核对；Android APK 版本在 `android-tv/app/build.gradle.kts` 中单独维护。详见[部署文档](https://libretv.is-an.org/wiki/Deployment.html)。
-
-### 手动运行
-
-使用本地点播源配置 `source.json` 启动（首次运行会自动安装依赖，随后构建并监听 8080）：
-
-```bash
-./start_local.sh
-```
-
-后台运行（关闭终端后继续运行，依赖安装和构建也在后台执行）：
-
-```bash
-./start_local.sh --background
-tail -f start_local.log                 # 查看启动进度和服务日志，Ctrl+C 退出查看
-kill "$(cat .start_local.pid)"          # 服务启动完成后停止服务
-```
-
-后台命令返回表示已创建进程；是否启动成功请查看日志。重复启动会检查 PID，日志在每次后台启动时覆盖。
-
-`start_local.sh` 默认设置 `AUTH_DISABLED=true`，所有能访问 8080 网页服务的客户端均免登录。恢复网页密码验证时运行 `AUTH_DISABLED=false PASSWORD=your-password ./start_local.sh`。普通 `npm start` / Docker 部署默认仍开启验证。此开关仅影响网页服务；独立 App 本身无需登录，电脑串流的配对码另行配置。
-
-也可以分别安装、构建和启动：
-
-```bash
-npm install
-PASSWORD=your-password npm run build
-PASSWORD=your-password npm start   # 监听 8080
-```
-
-### Android TV / 投影仪
-
-#### 1. 构建并安装独立 App
-
-需要 Node.js 22.16+、JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0。`JAVA_HOME` 指向 JDK 17；SDK 路径通过 `ANDROID_HOME` 或 `android-tv/local.properties` 的 `sdk.dir` 配置。本机 SDK、AVD 和构建产物均不提交到 Git，新电脑需先配置环境。
-
-在项目根目录执行：
-
-```bash
-npm ci --include=dev
 ./android-tv/gradlew -p android-tv :app:assembleDebug
 ```
 
-APK 输出：`android-tv/app/build/outputs/apk/debug/app-debug.apk`。也可将 APK 复制到电视 / 投影仪上侧载安装。
-
-已在投影仪开启 ADB 调试，并与电脑处于同一局域网时，可覆盖安装并启动（示例 IP 请替换为设备实际地址）：
+APK 输出到 `android-tv/app/build/outputs/apk/debug/app-debug.apk`，手机、电视、投影仪装同一个包。投影仪开启 ADB 调试后可以覆盖安装（IP 换成设备的实际地址）：
 
 ```bash
-PROJECTOR_IP=192.168.1.20
-adb connect "${PROJECTOR_IP}:5555"
-adb -s "${PROJECTOR_IP}:5555" install -r android-tv/app/build/outputs/apk/debug/app-debug.apk
-adb -s "${PROJECTOR_IP}:5555" shell am start -n org.libretv.tv/.MainActivity
+adb connect 192.168.1.20:5555
+adb -s 192.168.1.20:5555 install -r android-tv/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-ADB 若不在 PATH，可使用 `android-tv/.android-sdk/platform-tools/adb`。设备重启后 IP 可能变化，可查看网络设置，或用 `adb mdns services` 查找广播的 ADB 地址。
+升级请覆盖安装；卸载或清除应用数据会删除本地设置和记录。本地电视模拟器：`./android-tv/run_local_tv_emulator.sh`。
 
-首次打开即进入原生电视首页，默认“独立直连”。在首页“片源管理”或遥控器菜单键中管理片源，然后搜索播放；**无需启动 `start_local.sh`，也无需填写电脑地址**。升级请使用覆盖安装，卸载或清除应用数据会删除本地设置与记录。完整说明见 [Android TV 说明](android-tv/README.md)。
+### 电脑端
 
-#### 2. 启动可选的电脑增强串流
-
-当前增强环境验证基于 Ubuntu 24 x64、支持 Vulkan 的 NVIDIA GPU，以及包含 `libplacebo` 和 `h264_nvenc` 的 FFmpeg 6+。默认使用 FSRCNNX 超分与 NVENC 编码。首次配置会下载模型并检测工具；没有系统 FFmpeg 时，配置脚本会尝试在项目目录解包 Ubuntu 软件包。
-
-在项目根目录执行：
+需要 JDK 17。Windows 构建前把 VLC 3.0.x（win64）解压到 `.desktop-tools/vlc`、把 node.exe 放到 `.desktop-tools/node`，会一起打进程序：
 
 ```bash
-# 首次准备依赖；已完成 npm ci 的环境无需重复安装 npm 依赖
-npm run desktop:setup
-
-# 投影仪连接：监听局域网，默认端口 8090；前台运行，Ctrl+C 停止
-npm run desktop:server -- --host 0.0.0.0
+cd desktop
+./gradlew run                   # 开发时运行
+./gradlew createDistributable   # Windows：build/compose/binaries/main/app/SuperTV/SuperTV.exe
 ```
 
-电脑和投影仪需要处于可互访的局域网，防火墙允许 TCP 8090。App 的“片源管理”中：
+超分需要 NVIDIA 显卡；第一次使用在「设置 → 串流服务」里下载超分工具（FFmpeg 与模型）。电视要从局域网连接，Windows 防火墙需放行 TCP 8090。详见 [电脑端说明](desktop/README.md) 和 [串流服务说明](desktop-server/README.md)。
 
-1. 填写**电脑**地址，例如 `http://192.168.1.10:8090`；模拟器填写 `http://10.0.2.2:8090`。
-2. 从电脑 `.desktop-server/config.json` 读取 `token`，填入“电脑服务配对码”，选择“保存并测试”。该文件由服务首次启动自动生成，已加入 Git 忽略，请勿公开配对码。
-3. 选择“电脑串流”，仍在 App 内搜索、选片；电脑只接手播放处理，不需要手动推流。
-4. “AI 超分”可在片源管理或电脑串流播放设置中开关；默认开启并升一档。去广告独立控制，结果以播放页实际标注为准。
-
-8090 服务与 8080 网页服务独立，电脑串流无需启动 Next.js。单独执行 `npm run desktop:server` 默认只监听 `127.0.0.1`，适用于本机和 Android 模拟器，投影仪应使用上面的 `--host 0.0.0.0`。
-
-如果本机代理把片源域名解析为 `198.18.0.0/15` 的 Fake-IP，可改用：
+### 测试
 
 ```bash
-npm run desktop:server -- --host 0.0.0.0 --allow-fake-ip
+./android-tv/gradlew -p android-tv :core:test :app:testDebugUnitTest   # 数据层与安卓单元测试
+npm run desktop:test                                                    # 串流服务
 ```
 
-后台运行可使用下面的命令；与前台启动二选一，避免重复占用 8090：
+## 片源与订阅
 
-```bash
-mkdir -p .desktop-server
-nohup node desktop-server/start.mjs --host 0.0.0.0 \
-  > .desktop-server/server.log 2>&1 < /dev/null &
-echo $! > .desktop-server/server.pid
+片源是 Apple CMS 采集接口（形如 `https://example.com/api.php/provide/vod`）。内置片源表是仓库根目录的 [`source.json`](source.json)，构建时打进 APK 和电脑端。也可以在设置里添加单个片源、订阅片源列表，或从剪贴板批量导入：每行写一个采集接口地址（前面可以带名称）或订阅地址，也可以直接粘贴下面格式的 JSON。
 
-tail -f .desktop-server/server.log       # 查看日志，Ctrl+C 仅退出查看
-kill "$(cat .desktop-server/server.pid)" # 停止该后台服务
-```
-
-需要 Fake-IP 兼容时，也要在后台命令中加入 `--allow-fake-ip`。重启电脑服务后，已有播放任务需在 App 中重试。只测试原画转发时可用 `npm run desktop:server -- --host 0.0.0.0 --processing relay`，该模式不去广告、不超分；仅关闭超分并保留去广告时，请使用正常增强服务和 App 内的超分开关。
-
-模型、固定分辨率参数、缓存和性能限制见 [电脑串流说明](desktop-server/README.md)。
-
-#### 3. 在本地电视模拟器中调试
-
-已配置项目本地 SDK 和 `LibreTV-TV-API30` AVD 后，在项目根目录执行：
-
-```bash
-./android-tv/run_local_tv_emulator.sh
-```
-
-脚本启动或复用 Android 11 / 1080P 模拟器，构建、覆盖安装 APK 并进入与投影仪相同的原生界面。不会自动启动 8080 或 8090 服务；测试电脑串流时另开终端启动 8090 服务。首次准备的 SDK / AVD 位于 `android-tv/.android-sdk/`、`android-tv/.android-avd/`，新电脑需单独配置；脚本不会自动下载系统镜像或创建 AVD。
-
-单击模拟器画面后用方向键导航，Enter 确认，Esc / 返回键逐层返回；播放中左右键预览跳转、确认后生效，下键打开控制栏。脚本新建模拟器时需保持终端打开，关闭模拟器窗口后脚本结束。`--native-preview` 旧参数仍兼容；`--legacy-web` 仅用于调试对照旧网页界面。
-
-### 环境变量
-
-下表用于 8080 网页服务。独立 APK 不依赖这些环境变量；8090 电脑串流使用上方命令行参数和独立配对配置。
-
-| 变量 | 必填 | 说明 |
-| --- | --- | --- |
-| `PASSWORD` | 开启验证时必填 | 访问密码；开启验证且未设置时站点会提示管理员配置 |
-| `AUTH_DISABLED` | 否 | 仅设为 `true` 时关闭所有客户端的登录验证。普通部署默认关闭此开关，`start_local.sh` 默认开启 |
-| `PROXY_SECRET` | 否 | 会话/代理签名密钥；不设置时从 PASSWORD 派生（多实例部署建议显式设置） |
-| `DEFAULT_SOURCES` | 否 | 预置采集站（JSON 数组），用户端自动出现且默认勾选，详见[配置文档](https://libretv.is-an.org/wiki/Configuration.html) |
-| `REQUEST_TIMEOUT` | 否 | 代理上游请求超时（毫秒），默认 8000 |
-| `MAX_RETRIES` | 否 | 代理请求重试次数，默认 1 |
-| `SEARCH_MAX_PAGES` | 否 | 每个搜索源最多抓取的页数（1-50，默认 5）。第一页会读取源站 `pagecount`，实际页数 = min(源站总页数，该值)；页间并行请求，单页失败只丢该页 |
-| `SEARCH_SOURCE_TIMEOUT_MS` | 否 | 单个搜索源的总死线（毫秒，3s-60s，默认 10000）：该源所有分页请求须在时限内完成，到点中断并将其标记为「超时」；健康度自动停用也以此为超时判定依据 |
-| `USER_AGENT` | 否 | 代理请求使用的 UA（豆瓣封面防盗链等场景），默认 Chrome UA |
-| `FALLBACK_CORS_PROXY` | 否 | 豆瓣推荐数据直连被拒时降级使用的 CORS 代理地址 |
-| `COOKIE_SECURE` | 否 | 显式覆盖会话 cookie 的 `Secure` 标记（`true` / `false`）；默认按请求协议自动推导。反向代理未正确传递 `x-forwarded-proto` 导致 HTTPS 下登录失效时，设为 `true` 可解 |
-| `60S_API_BASE` | 否 | 影视榜单推荐源（60s API）实例地址，默认 `https://60s.crystelf.top`；有限流，高频使用可[自部署](https://github.com/vikiboss/60s) |
-| `DEFAULT_LIVE_SOURCES` | 否 | 预置直播源（M3U 订阅），JSON 数组：`[{"name":"源名","url":"https://.../list.m3u","epg":"https://.../epg.xml.gz"}]`，`epg` 为可选的 XMLTV 节目单地址 |
-| `DEFAULT_SUBSCRIPTIONS` | 否 | 预置数据源订阅（LibreTV-SourceList JSON 链接，也接受 TVBOX 配置地址），JSON 数组：`["https://.../sources.json", {"url":"https://.../list.json","name":"名称"}]`。首次访问自动导入点播源与直播源，之后每 24h 静默刷新；用户删除后不再自动加回 |
-| `DEFAULT_RECOMMEND_SOURCE` | 否 | 首页推荐数据源的默认值（`douban` / `bangumi` / `hot-list`，出厂默认 `hot-list`）；仅对未在设置中主动选择过的用户生效，用户的选择始终优先 |
-| `DESKTOP_SERVER_URL` | 否 | 资料同步和「已下载」页面使用的电脑串流服务地址，默认 `http://127.0.0.1:8090`（与网页服务在同一台电脑） |
-| `DESKTOP_PAIRING_TOKEN` | 否 | 上述串流服务的配对码；未设置时读取运行目录下的 `.desktop-server/config.json`。两者都没有时网页端不启用资料同步 |
-| `LIVE_ALLOW_PRIVATE` | 否 | 设为 `1` 时允许直播流代理访问内网/保留地址（自建 IPTV 场景），默认关闭以维持 SSRF 防护 |
-
-## 使用说明
-
-1. **添加点播源**：设置 → 源管理 → 点播源 → 添加 API，填入 Apple CMS 采集站地址（如 `https://example.com/api.php/provide/vod`），可选填详情页地址（部分源需要爬详情页提取播放地址）。
-2. **搜索**：勾选点播源后输入片名；搜索通过服务端聚合，个别源失败不影响整体结果。
-3. **播放**：详情弹窗选择剧集进入 `/watch`；支持快捷键（空格/←→/↑↓/F/Alt+←→）、移动端长按 3 倍速、自动连播、换源测速。观看/暂停时后续分片自动缓存到本地（设置可关），播放页可「下载本集」（TS/MP4）离线观看。
-4. **进度与历史**：自动保存在本设备 IndexedDB，仅定位信息入库，播放时自动同步最新剧集。
-5. **配置迁移**：设置 → 数据 → 配置导入导出（兼容旧版 LibreTV-Settings JSON 的历史记录迁移）。
-
-## 已下载（电脑片库）
-
-电脑上运行着串流服务时，顶栏会出现「已下载」。这里列出电视端选择「下载到电脑」后保存在电脑上的整集：可以看处理进度、直接在浏览器里播放、取消或删除。播放数据由网页服务转发（`/api/library`），浏览器不需要配对码；片源失效或断网后仍能观看。记住的播放位置只保存在当前浏览器。电视下载时如果选用了 HEVC 编码，需要支持 HEVC 的浏览器（Edge、Chrome、Safari）。
-
-## 界面风格
-
-网页与电视端 SuperTV 统一为黑白灰简约风格：深色主题为纯黑底、灰阶层次、白色强调；浅色主题为对应的白底黑字。颜色全部由 `src/app/globals.css` 里的变量控制。
-
-## 直播 / IPTV
-
-1. **添加直播源**：设置 → 源管理 → 直播源 → 填入 M3U/M3U8 地址（可选填 XMLTV 节目单地址），添加后自动探活并显示频道数量；也可在「源管理 → 数据源订阅」中与点播源一起订阅导入；部署者还可用 `DEFAULT_LIVE_SOURCES` 环境变量预置。
-2. **观看**：进入「直播」页，按分组标签筛选或搜索频道，点击即播；支持 HLS（m3u8）与 HTTP-FLV 两种直播流，直连失败自动走代理通道重试。
-3. **节目单**：频道带 `tvg-id` 且订阅配置了 EPG 地址时，展示当前/接下来节目与播放进度。
-4. **收藏与导出**：频道可收藏；订阅可一键导出为标准 M3U 文件，供 PotPlayer / VLC 等外部播放器使用。
-
-完整说明见 [直播 / IPTV 文档](https://libretv.is-an.org/wiki/Live-IPTV.html)。
-
-> ⚠️ 项目不内置任何频道源，也不存储、不制作任何直播内容，仅提供第三方公开播放列表的解析与播放能力，内容的合法性由对应数据源负责。内网自建源默认被 SSRF 防护拦截，自部署者可显式设置 `LIVE_ALLOW_PRIVATE=1` 放行。
-
-## 数据源订阅 / 分享
-
-数据源（点播源 + 直播源）可以 **导出为一份 JSON → 托管到公开 URL → 他人在「设置 → 源管理 → 数据源订阅」里填入该 URL 订阅**。
-
-托管地址没有特殊要求，可用 [npoint.io](https://www.npoint.io/) 免费托管 JSON（粘贴内容即可得到一个公开 URL），Gist、对象存储、任意静态托管同样可用。
-
-### 订阅格式（LibreTV-SourceList JSON）
+订阅地址指向一份公开的 JSON，可用 Gist、对象存储或任意静态托管：
 
 ```json
 {
   "name": "我的源列表",
-  "version": 2,
   "sources": [
-    {
-      "name": "示例点播源",
-      "url": "https://example.com/api.php/provide/vod",
-      "detail": "https://example.com",
-      "isAdult": false
-    }
-  ],
-  "liveSources": [
-    {
-      "name": "示例直播源",
-      "url": "https://example.com/list.m3u",
-      "epg": "https://example.com/epg.xml.gz"
-    }
+    { "name": "示例点播源", "url": "https://example.com/api.php/provide/vod", "detail": "https://example.com", "isAdult": false }
   ]
 }
 ```
 
-**字段说明**：
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 否 | 列表名称，显示在订阅条目上 |
+| `sources[].url` | **是** | 采集接口地址（http/https）；按地址去重，最多 100 个 |
+| `sources[].name` | 否 | 显示名，缺省用地址的主机名 |
+| `sources[].detail` | 否 | 详情页根地址，给列表接口拿不到播放地址、需要读详情页的源用 |
+| `sources[].isAdult` | 否 | 成人内容标记 |
 
-| 字段 | 位置 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- | --- |
-| `name` | 顶层 | string | 否 | 列表名称，订阅后显示在订阅条目上；缺省时显示订阅地址主机名 |
-| `version` | 顶层 | number | 否 | 格式版本，当前为 `2`（新增 `liveSources`）；导入端目前忽略该字段 |
-| `sources` | 顶层 | array | 否 | **点播源**数组（Apple CMS 采集站），最多 100 个，超出部分截断 |
-| `sources[].name` | 项 | string | 否 | 源显示名；缺省时使用 URL 主机名 |
-| `sources[].url` | 项 | string | **是** | Apple CMS 采集接口地址（公网 http/https），结尾 `/` 自动去除 |
-| `sources[].detail` | 项 | string | 否 | 详情页根地址，用于列表接口拿不到播放地址、需要爬详情页提取 m3u8 的源 |
-| `sources[].isAdult` | 项 | boolean | 否 | 成人内容标记，默认 `false`。标记为 `true` 的源名称旁显示 **(18+)** 徽章；设置中的「成人内容过滤」开启（默认开启）时该源不可勾选、不参与搜索，需先关闭过滤才能启用 |
-| `liveSources` | 顶层 | array | 否 | **直播源**数组（M3U 播放列表），最多 50 个，超出部分截断 |
-| `liveSources[].name` | 项 | string | 否 | 源显示名；缺省时使用 URL 主机名 |
-| `liveSources[].url` | 项 | string | **是** | M3U 播放列表地址（http/https） |
-| `liveSources[].epg` | 项 | string | 否 | XMLTV 节目单地址（`xml` / `xml.gz`），用于 `/live` 页展示节目单；地址非法时只丢弃该字段、保留整条源 |
-
-**兼容与限制**：
-
-- 只写 `sources` 的老订阅照常可用（纯点播），只写 `liveSources` 则是纯直播订阅；两者都缺时提示「订阅内容格式不正确」；裸数组 `[{ "name": "...", "url": "..." }]` 视为点播源；
-- 按 `url` 去重（先到先得）；非 http(s) 地址会被过滤；**点播源**另需为公网地址（内网/回环/保留地址会被静默过滤），**直播源**在部署者设置 `LIVE_ALLOW_PRIVATE=1` 时可使用内网自建源地址；
-- 订阅由**服务端**拉取（拉取前经过 SSRF 校验），因此订阅地址**无需配置 CORS**，Gist、对象存储、任意静态托管均可。
-
-### 兼容 TVBOX 配置
-
-订阅地址也可以直接填 **TVBOX 配置**（形如 `{"sites": [...], "lives": [...], "parses": [...]}`）：服务端按内容结构自动识别格式，无需手动选择。
-
-- **点播源**：导入 `sites` 中 `type: 1` 的 JSON 接口（即 Apple CMS 采集站）；部分共享配置省略 `type` 或写成 `0`，但地址命中 `api.php/provide/vod` 时同样导入；站点自身标记 `searchable: 0`（不可搜索）时跳过；
-- **直播源**：导入 `lives` 中 `type: 0`（或省略）的 M3U 播放列表，`epg` 字段一并带上；txt 频道列表与单仓 JSON 不支持；
-- **Spider 类站点会跳过**：`type: 3` 的 Spider（`csp_*` / `.jar` / `.js` / `.py`）需要 TVBOX 自身的 Spider 引擎才能运行，Node 侧无法执行；XML 接口、外链 JSON 同理。被跳过的条目不影响其余导入，导入结果会如实提示，如「已同步 8 个点播源、2 个直播源（TVBOX 配置）；跳过 96 个不可用条目（Spider 引擎 92、XML 接口 4）」；
-- TVBOX 配置常含上百条站点且以 Spider 为主，**只导入个位数到十几个属正常现象**；
-- **格式容错**：配置里的 `//` 注释、尾随逗号、字符串内未转义的换行会自动修正后再解析（共享配置中很常见，TVBOX 客户端用的 fastjson 同样容忍这些写法）；
-- 其他限制：订阅地址需直接返回 JSON（Base64 / 压缩包装的分享链接不支持）；TVBOX「多仓」配置（顶层为 `urls` 数组）不支持，请填单仓配置；地址公网校验、去重与数量上限与上方格式完全一致。
-
-### 订阅行为
-
-- **订阅**：设置 → 源管理 → 数据源订阅 → 填入订阅地址 → 「订阅」，导入的点播源自动勾选、直播源自动启用，均带「订阅」标识，条目上显示「点播 N · 直播 M」；
-- **同步**：订阅条目上的 **⟳** 手动强制同步，整体替换该订阅名下的点播源与直播源；
-- **管理边界**：订阅源以远端列表为准，单独编辑会在下次同步时被覆盖，单独移除会在重新同步时恢复；如需调整请改远端列表，或直接删除整个订阅。删除订阅时点播源全部移除；直播源为**多归属共享**——同一 M3U 可被多个订阅引用（名称/EPG 以首次导入为准），删除订阅或远端列表中移除该源后再同步，都只摘除本订阅的引用，仅当不再被任何订阅引用时才移除该源，手动添加的源不受同步影响，**收藏的频道始终保留**；
-- **导出分享**：设置 → 源管理 → 数据源订阅 → 「导出数据源」，把当前全部点播源与直播源（预置 + 手动 + 订阅，按 URL 去重）导出为上述 JSON；也可用「发布为链接」，把当前**已勾选启用**的源一键上传到公开粘贴板（paste.rs，失败自动降级 0x0.st），直接返回可填入订阅框的 URL，无需自备托管。注意：发布的内容**公开可读**，且每次发布生成新链接、不支持覆盖更新，需长期稳定请用导出 + 自行托管。
-
-> 订阅由服务端拉取（经过 SSRF 校验），因此订阅地址无需配置 CORS。完整说明见 [数据源文档](https://libretv.is-an.org/wiki/Data-Sources.html)。
-
-## 开发
-
-```bash
-npm install
-PASSWORD=dev-password npm run dev   # http://localhost:8080
-npm test                            # 核心库单元测试（cms-parser / m3u8 / ssrf）
-npm run typecheck
-```
-
-测试范围、发布流程与文档结构见 [开发文档](https://libretv.is-an.org/wiki/Development.html)。
-
-## 发布新版本
-
-网页镜像版本号以 `package.json` 为来源，发布镜像由 GitHub Actions 自动完成；Android 版本需单独更新 `android-tv/app/build.gradle.kts` 中的 `versionCode` / `versionName` 并重新构建 APK：
-
-```bash
-npm version patch       # 或 minor / major；会更新 package.json 并打 git tag
-git push && git push --tags
-```
-
-CI 校验通过后自动构建并推送 `ghcr.io/librespark/libretv:<版本>`（详见[部署文档](https://libretv.is-an.org/wiki/Deployment.html)）。
+- 裸数组 `[{ "name": "...", "url": "..." }]` 视为片源列表；`liveSources`（直播源）会被忽略，SuperTV 暂不支持直播。
+- 也可以直接填 **TVBox 配置**（`{"sites": [...]}`）：只导入能直接搜索的采集接口（`type: 1`，或地址是 `api.php/provide/vod` 的站点）；Spider、XML 接口、标记为不可搜索的站点会跳过，并提示跳过了多少、各是什么原因。TVBox 配置常有上百个站点但多数是 Spider，只导入十几个属正常。
+- 订阅的片源以远端列表为准，重新同步会恢复。在设置里删掉的订阅片源，之后同步也不会再加回来；可以在片源列表里一键恢复。
 
 ## 安全说明
 
-- 网页访问密码保存在服务端环境变量中；独立 App 无需登录。电脑串流配对码由电脑生成并保存在已配对的设备本地，请勿公开或写入媒体 URL。
-- 登录接口有 IP 速率限制（10 次 / 10 分钟）。
-- 代理内置 SSRF 防护：拒绝内网/保留地址（含 DNS 解析后校验），仅放行 http(s)。
-- 未登录会话仅允许代理图片类目标（豆瓣封面防盗链需要）。
+- 电脑配对：电视第一次连接时输入电脑端显示的 6 位配对码，换取长期令牌；5 分钟内输错 5 次会暂时锁定。配对码每次启动串流服务都会更换。
+- 手机第一次连接电视时，要在电视上确认。
+- 令牌只保存在已配对的设备上，不要公开或写进媒体地址。
+- 串流服务只读取公网片源（拒绝内网与保留地址，含 DNS 解析后校验）；电脑端的播放代理只监听 127.0.0.1。
 
-## 衍生作品
+## 来源与许可
 
-| 项目 | 说明 |
-| --- | --- |
-| [OrionTV](https://github.com/orion-lib/OrionTV) | Apple TV / Android TV 客户端（React Native TVOS + Expo），配合 MoonTV 使用 |
-| [LunaTV](https://github.com/MoonTechLab/LunaTV) | 影视聚合站（Next.js），支持 Redis / Upstash 等多存储后端 |
-| [Selene-TV](https://github.com/MoonTechLab/Selene-TV) | Android TV（Leanback）客户端，Kotlin + Compose，对接 MoonTV / Helios |
-| [EchoTV](https://github.com/hoowhoami/EchoTV) | Flutter 全平台客户端（已归档） |
-| [WarHutTV](https://github.com/OuOumm/WarHutTV) | Go + React 的自托管影视聚合站 |
-| [DecoTV](https://github.com/Decohererk/DecoTV) | 聚合播放站（原 KatelyaTV） |
-| [Joyflix](https://github.com/jeffernn/Joyflix-Mac-Objective-C) | macOS 原生影视聚合客户端（Objective-C） |
-| [MoonCakeTV](https://github.com/MoonCakeTV/MoonCakeTV) | 影视聚合搜索站（Next.js），文件存储、一键脚本部署 |
-| [OrangeTV](https://github.com/djteang/OrangeTV) | 跨平台影视聚合播放器（Next.js），Kvrocks/Redis/Upstash 多存储与多端同步 |
-
-> 旧版 LibreTV（静态 HTML + Express）完整代码见 [backup-2025 分支](https://github.com/LibreSpark/LibreTV/tree/backup-2025)。
+本项目基于 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)（AGPL-3.0）改写，许可证同为 AGPL-3.0，见 [LICENSE](LICENSE)。
 
 ## 免责声明
 
 本项目不存储、不制作任何视频内容，仅提供第三方公开接口的聚合与播放能力，内容的合法性由对应数据源负责。
-
-☕ 觉得有用的话，可以到 [AFDIAN](https://afdian.com/a/veehub) 请我喝杯咖啡。
