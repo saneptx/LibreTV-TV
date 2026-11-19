@@ -289,7 +289,7 @@ private fun chooseLibrary(m: AppModel, dialog: DialogState) {
 private fun AboutPane() {
     val m = LocalModel.current
     Group("关于") {
-        SettingRow("SuperTV 电脑端", "版本 1.0.0")
+        SettingRow("SuperTV 电脑端", "版本 " + (System.getProperty("jpackage.app-version") ?: "开发版"))
         Divider()
         SettingRow("数据目录", m.home.path)
         Divider()

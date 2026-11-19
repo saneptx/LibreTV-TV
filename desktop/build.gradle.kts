@@ -26,7 +26,8 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Dmg)
             packageName = "SuperTV"
-            packageVersion = "1.0.0"
+            // 版本号来自发布用的 tag（v1.2.3 → -PappVersion=1.2.3）；MSI 要求三段数字，主版本号在 1 到 255 之间
+            packageVersion = providers.gradleProperty("appVersion").getOrElse("1.0.0")
             // jpackage 在中文 Windows 上按 GBK 读参数文件，这里只能写英文
             description = "SuperTV Desktop"
             vendor = "SuperTV"
@@ -34,7 +35,10 @@ compose.desktop {
             appResourcesRootDir.set(layout.buildDirectory.dir("app-resources"))
             modules("java.net.http", "jdk.httpserver", "jdk.unsupported")
             windows {
+                // 装到 Program Files（安装时需要管理员确认，可自选目录）。不用按用户安装：
+                // 那样会装进 %LOCALAPPDATA%\SuperTV，和程序的数据目录撞在一起
                 menuGroup = "SuperTV"
+                menu = true
                 shortcut = true
                 dirChooser = true
                 iconFile.set(project.file("icons/supertv.ico"))
@@ -58,6 +62,18 @@ val prepareSuperTvResources by tasks.registering(Sync::class) {
     if (vlc.isDirectory) from(vlc) { into("vlc"); exclude("vlc.exe", "uninstall.exe", "lua/**", "skins/**", "locale/**", "hrtfs/**", "*.txt", "*.html") }
 }
 tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(prepareSuperTvResources) }
+
+// 随包的 VLC 没有插件缓存（plugins.dat），没有它 VLC 每次都要逐个加载几百个插件 DLL（约 20 多秒）。
+// 安装到 Program Files 后程序目录不能写，所以在构建时生成好，一起打进安装包
+val vlcPluginCache by tasks.registering(Exec::class) {
+    val plugins = layout.buildDirectory.dir("app-resources/common/vlc/plugins").get().asFile
+    val gen = rootProject.projectDir.parentFile.resolve(".desktop-tools/vlc/vlc-cache-gen.exe")
+    dependsOn(prepareSuperTvResources)
+    onlyIf { System.getProperty("os.name").startsWith("Windows") && gen.isFile && plugins.isDirectory }
+    commandLine(gen.path, plugins.path)
+}
+prepareSuperTvResources.configure { finalizedBy(vlcPluginCache) }
+tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(vlcPluginCache) }
 
 // 用标志的矢量画法生成各尺寸 PNG，再合成 Windows 的 .ico 和 macOS 的 .icns（结果提交在 icons/ 下）
 val generateIcons by tasks.registering(JavaExec::class) {

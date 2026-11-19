@@ -15,8 +15,10 @@ android {
         applicationId = "org.libretv.tv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 33
-        versionName = "0.8.6"
+        // 发布时由 tag 决定（v1.0.0 → -PappVersion=1.0.0，versionCode = 主×1000000 + 次×1000 + 修订）
+        val release = providers.gradleProperty("appVersion").orNull
+        versionCode = release?.split('.')?.map { it.toInt() }?.let { (a, b, c) -> a * 1_000_000 + b * 1_000 + c } ?: 33
+        versionName = release ?: "0.8.6"
         buildConfigField("String", "LIBRETV_URL", "\"${libreTvUrl.get()}\"")
     }
 
@@ -25,8 +27,21 @@ android {
 
     buildFeatures { buildConfig = true }
 
+    // 发布版签名：密钥由环境变量提供（GitHub Actions 里来自仓库的 Secrets）。必须一直用同一把密钥，
+    // 否则已安装的设备无法覆盖升级。没有提供时用本机的调试密钥签名。
+    val keystore = providers.environmentVariable("SUPERTV_KEYSTORE").orNull?.let(::file)?.takeIf { it.isFile }
+    signingConfigs {
+        if (keystore != null) create("release") {
+            storeFile = keystore
+            storePassword = providers.environmentVariable("SUPERTV_KEYSTORE_PASSWORD").get()
+            keyAlias = providers.environmentVariable("SUPERTV_KEY_ALIAS").get()
+            keyPassword = providers.environmentVariable("SUPERTV_KEY_PASSWORD").get()
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = if (keystore != null) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
