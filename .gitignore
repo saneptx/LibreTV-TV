@@ -29,3 +29,11 @@ android-tv/.web-build/
 .desktop-server/
 android-tv/.preview/
 android-tv/.emulator-phone.log
+# 电脑端：构建输出、本机测试用的 VLC、Windows 上的构建工具
+desktop/build/
+desktop/.gradle/
+desktop/.kotlin/
+desktop/.vlc/
+.desktop-tools/
+android-tv/core/build/
+.DS_Store
