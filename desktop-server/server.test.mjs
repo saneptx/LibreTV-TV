@@ -133,3 +133,32 @@ test('按下载条目播放：条目不存在或没有片库时返回 404', asyn
     const res=await request('/v1/sessions',{method:'POST',body:JSON.stringify({download})}); assert.equal(res.status,404,String(download));
   }
 });
+
+test('电视用 6 位配对码换取长配对码，输错有次数限制', async () => {
+  let clock = 1_000_000;
+  const longToken = 'p'.repeat(32);
+  const { server: app, closeSessions: close } = createDesktopServer({ token: longToken, pin: '042917', deviceName: '书房电脑', now: () => clock });
+  await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${app.address().port}`;
+  const pair = (pin, headers = {}) => fetch(`${base}/v1/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ pin }) });
+  try {
+    assert.deepEqual(await (await fetch(`${base}/v1/hello`)).json(), { service: 'LibreTV Desktop', protocol: 1, name: '书房电脑', pairing: 'pin' });
+    assert.equal((await fetch(`${base}/v1/status`)).status, 401);
+    assert.equal((await pair('000000')).status, 403);
+    assert.equal((await pair('042917', { Origin: 'http://evil.example' })).status, 403);
+    const ok = await pair('042 917');
+    assert.equal(ok.status, 200); assert.equal((await ok.json()).token, longToken);
+    assert.equal((await fetch(`${base}/v1/status`, { headers: { Authorization: `Bearer ${longToken}` } })).status, 200);
+    for (let i = 0; i < 4; i++) assert.equal((await pair('111111')).status, 403);
+    assert.equal((await pair('042917')).status, 429, '输错 5 次后即使输对也要等');
+    clock += 5 * 60_000 + 1;
+    assert.equal((await pair('042917')).status, 200);
+  } finally { close(); app.close(); app.closeAllConnections(); }
+  const { server: plain, closeSessions: closePlain } = createDesktopServer({ token: longToken });
+  await new Promise((resolve) => plain.listen(0, '127.0.0.1', resolve));
+  try {
+    const url = `http://127.0.0.1:${plain.address().port}`;
+    assert.equal((await (await fetch(`${url}/v1/hello`)).json()).pairing, 'token');
+    assert.equal((await fetch(`${url}/v1/pair`, { method: 'POST', body: '{"pin":"000000"}' })).status, 404);
+  } finally { closePlain(); plain.close(); plain.closeAllConnections(); }
+});

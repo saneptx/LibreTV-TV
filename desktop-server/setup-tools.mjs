@@ -5,7 +5,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, join, basename } from 'node:path';
 import { toolConfig, localFfmpeg } from './runtime.mjs';
-process.chdir(resolve(import.meta.dirname, '..'));
+// 数据目录：电脑端程序通过 SUPERTV_HOME 指定（配对码、同步资料、片库、超分工具都在其下的 .desktop-server）；直接在仓库里运行时为仓库根目录
+process.chdir(process.env.SUPERTV_HOME ? resolve(process.env.SUPERTV_HOME) : resolve(import.meta.dirname, '..'));
 const exec = promisify(execFile);
 const { values } = parseArgs({ options: { quality: { type: 'boolean', default: false } } });
 const root = resolve('.desktop-server/tools'); await mkdir(root,{recursive:true,mode:0o700});
