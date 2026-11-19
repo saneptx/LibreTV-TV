@@ -1,25 +1,45 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { Suspense, useEffect, useState } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { ThemeToggle } from './theme';
 import { SourceManagerDrawer } from './source-manager';
 import { HistoryPanel } from './history-panel';
 import { requestShowDownloadManager } from './download-manager';
 import { Icon } from './icon';
 import { SearchHistoryDropdown, useSearchHistory } from './search-history';
+import { useQuery } from '@tanstack/react-query';
+import { api, STATUS_QUERY_KEY } from '@/lib/client-api';
 import { cn } from '@/lib/utils';
+import { getNativeHttpBridge } from '@/lib/native-http';
 
 /** 顶部导航：Logo、搜索框（首页外）、历史、设置 */
-export function Header({ showSearch = false }: { showSearch?: boolean }) {
+/** overlay：首页顶栏悬浮在主推海报上，滚动后才出现底色 */
+export function Header(props: { showSearch?: boolean; overlay?: boolean }) {
+  // 内部读取地址栏参数，需要 Suspense 边界（静态预渲染的页面也能用）
+  return <Suspense><HeaderBar {...props} /></Suspense>;
+}
+
+function HeaderBar({ showSearch = false, overlay = false }: { showSearch?: boolean; overlay?: boolean }) {
   const router = useRouter();
   const pathname = usePathname();
+  const params = useSearchParams();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const update = () => setScrolled(window.scrollY > 24);
+    update();
+    window.addEventListener('scroll', update, { passive: true });
+    return () => window.removeEventListener('scroll', update);
+  }, []);
+  const searching = pathname === '/' && (params.has('s') || params.has('search'));
   const [query, setQuery] = useState('');
   // 与首页搜索框共用同一套「最近搜索」下拉逻辑
   const searchHistory = useSearchHistory(query);
+  // 这台电脑配置了串流服务时才显示电脑片库入口
+  const { data: status } = useQuery({ queryKey: STATUS_QUERY_KEY, queryFn: () => api.status() });
 
   const submitSearch = (text: string) => {
     const q = text.trim().slice(0, 100);
@@ -35,13 +55,24 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
     submitSearch(text);
   };
 
+  const [inApp, setInApp] = useState(false);
+  useEffect(() => setInApp(Boolean(getNativeHttpBridge())), []);
+  const tabs = [
+    { href: '/', label: '首页', icon: 'home' as const, active: pathname === '/' && !searching },
+    { href: '/library', label: '片库', icon: 'plus' as const, active: pathname === '/library' },
+    ...(status?.librarySync ? [{ href: '/downloads', label: '已下载', icon: 'download' as const, active: pathname === '/downloads' }] : []),
+    // 安卓应用内没有网页服务端，直播依赖的接口不可用
+    ...(inApp ? [] : [{ href: '/live', label: '直播', icon: 'bolt' as const, active: pathname === '/live' }]),
+  ];
+
   return (
     <>
-      <header className="sticky top-0 z-40 bg-surface/90 backdrop-blur border-b border-line">
-        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center gap-3">
-          <Link href="/" aria-label="LibreTV 首页" className="flex items-center shrink-0">
+      <header className={cn("sticky top-0 z-40 transition-colors duration-300", overlay && !scrolled ? "bg-transparent" : "bg-page/80 backdrop-blur-xl")}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-8 h-16 flex items-center gap-3">
+          <Link href="/" aria-label="SuperTV 首页" className="flex items-center gap-2 shrink-0">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/icons/icon-512.png" alt="LibreTV" className="w-7 h-7 rounded-lg" />
+            <img src="/icons/logo.svg" alt="" className="w-7 h-7 rounded-lg border border-line" />
+            <span className="hidden sm:inline text-lg font-bold tracking-tight text-content">SuperTV</span>
           </Link>
 
           {showSearch && (
@@ -94,15 +125,16 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
             </form>
           )}
 
-          <div className="flex-1 sm:hidden" />
 
-          <nav className="flex items-center gap-1 ml-auto">
-            <HeaderLink href="/live" active={pathname === '/live'}>
-              直播
-            </HeaderLink>
-            <HeaderLink href="/about" active={pathname === '/about'}>
-              关于
-            </HeaderLink>
+          <nav aria-label="主导航" className="hidden md:flex items-center gap-0.5 rounded-full bg-chip/70 backdrop-blur-xl p-1 mx-auto">
+            {tabs.map((tab) => <HeaderLink key={tab.href} href={tab.href} active={tab.active}>{tab.label}</HeaderLink>)}
+          </nav>
+          <div className="flex-1 md:hidden" />
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Link href="/?search=1" aria-label="搜索" title="搜索" className="hidden md:flex w-9 h-9 items-center justify-center rounded-full bg-chip/80 text-muted hover:text-content hover:bg-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
+              <Icon name="search" />
+            </Link>
             <ThemeToggle />
             <IconButton label="观看历史" onClick={() => setHistoryOpen(true)}>
               <Icon name="clock" />
@@ -113,9 +145,20 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
             <IconButton label="设置" onClick={() => setSettingsOpen(true)}>
               <Icon name="gear" />
             </IconButton>
-          </nav>
+          </div>
         </div>
       </header>
+
+      {/* 手机宽度：底部悬浮标签栏 */}
+      <nav aria-label="主导航" className="md:hidden fixed z-40 inset-x-3 bottom-3 flex items-stretch gap-1 rounded-[28px] bg-surface/75 backdrop-blur-2xl border border-line p-1.5 shadow-2xl shadow-black/40 pb-[max(0.375rem,env(safe-area-inset-bottom))]">
+        {[...tabs, { href: '/?search=1', label: '搜索', icon: 'search' as const, active: searching }].map((tab) => (
+          <Link key={tab.href} href={tab.href} aria-current={tab.active ? 'page' : undefined}
+            className={cn('flex-1 flex flex-col items-center gap-0.5 rounded-[22px] py-1.5 text-[11px] font-medium transition-colors', tab.active ? 'bg-hover text-content' : 'text-muted')}>
+            <Icon name={tab.icon} className="w-5 h-5" />
+            {tab.label}
+          </Link>
+        ))}
+      </nav>
 
       <SourceManagerDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <HistoryPanel open={historyOpen} onClose={() => setHistoryOpen(false)} />
@@ -128,8 +171,9 @@ function HeaderLink({ href, active, children }: { href: string; active: boolean;
     <Link
       href={href}
       className={cn(
-        'px-2.5 py-1.5 rounded-md text-sm transition-colors',
-        active ? 'text-content bg-hover' : 'text-muted hover:text-content'
+        'px-4 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
+        active ? 'bg-accent text-on-accent' : 'text-muted hover:text-content'
       )}
     >
       {children}
@@ -140,7 +184,7 @@ function HeaderLink({ href, active, children }: { href: string; active: boolean;
 function IconButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
   return (
     <button
-      className="p-2 rounded-md text-muted hover:text-content hover:bg-hover transition-colors"
+      className="w-9 h-9 flex items-center justify-center rounded-full bg-chip/80 text-muted hover:text-content hover:bg-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
       title={label}
       aria-label={label}
       onClick={onClick}

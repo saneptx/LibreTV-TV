@@ -50,6 +50,8 @@ export async function readPlaylist(response, limit = 4 * MiB) {
   for await (const chunk of response) { size += chunk.length; if (size > limit) { response.destroy(); throw problem(422, '视频清单过大'); } chunks.push(chunk); }
   return Buffer.concat(chunks).toString('utf8');
 }
+/** 本地播放列表里的文件地址。Windows 路径统一成正斜杠：FFmpeg 解析带引号的属性（密钥、初始化片段）时会吃掉反斜杠 */
+export const fileUri = (path) => 'file:' + path.replace(/\\/g, '/');
 export function createProcessor(tools, { cacheDir = '.desktop-server/cache', cacheBytes = 8 * 1024 ** 3, runner = run, prefetch = 4, startupBufferSeconds = 8, overlapDownloads = true } = {}) {
   if (!Number.isInteger(startupBufferSeconds) || startupBufferSeconds < 0 || startupBufferSeconds > 30) throw problem(400, '启动预缓冲须为0–30秒');
   const root = resolve(cacheDir), budget = new DiskBudget(root, cacheBytes), queue = new WorkQueue(), sourceQueue = overlapDownloads ? new WorkQueue() : queue;
@@ -163,17 +165,17 @@ export class SourceReader {
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
   // jumps：窗口内有 DISCONTINUITY（去广告后的拼接点），才让 ffmpeg 把时间戳跳变拉平；连续窗口用这个阈值会误判正常的分片衔接，把音视频整体挪动约 0.2 秒
-  inputOptions(hls, probe = false, jumps = true) { return hls ? ['-protocol_whitelist','file,crypto,data','-allowed_extensions','ALL',...(probe || !jumps ? [] : ['-dts_delta_threshold','0.1'])] : ['-protocol_whitelist','file,crypto,data']; }
+  inputOptions(hls, probe = false, jumps = true) { return hls ? ['-protocol_whitelist','file,crypto,data','-allowed_extensions','ALL',...(this.tools.hlsOptions || []),...(probe || !jumps ? [] : ['-dts_delta_threshold','0.1'])] : ['-protocol_whitelist','file,crypto,data']; }
   async localWindow(media, start, duration, dir, name, signal = this.signal) {
     const selected = sliceMedia(media, start, duration); const lines = ['#EXTM3U','#EXT-X-VERSION:6',`#EXT-X-TARGETDURATION:${Math.ceil(Math.max(...selected.segments.map((s) => s.duration)))}`,'#EXT-X-MEDIA-SEQUENCE:0'];
     let previous, jumps = false;
-    const keyLine = async (key) => key ? `#EXT-X-KEY:METHOD=AES-128,URI="file:${await this.raw(key.url, undefined, undefined, signal)}",IV=${key.iv}` : '#EXT-X-KEY:METHOD=NONE';
+    const keyLine = async (key) => key ? `#EXT-X-KEY:METHOD=AES-128,URI="${fileUri(await this.raw(key.url, undefined, undefined, signal))}",IV=${key.iv}` : '#EXT-X-KEY:METHOD=NONE';
     for (const segment of selected.segments) {
       check(signal);
       if (previous !== undefined && (segment.sequence !== previous + 1 || segment.discontinuity)) { lines.push('#EXT-X-DISCONTINUITY'); jumps = true; }
-      if (segment.map) { lines.push(await keyLine(segment.map.key)); lines.push(`#EXT-X-MAP:URI="file:${await this.raw(segment.map.url, segment.map.range, undefined, signal)}"`); }
+      if (segment.map) { lines.push(await keyLine(segment.map.key)); lines.push(`#EXT-X-MAP:URI="${fileUri(await this.raw(segment.map.url, segment.map.range, undefined, signal))}"`); }
       lines.push(await keyLine(segment.key));
-      lines.push(`#EXTINF:${segment.duration},`,`file:${await this.raw(segment.url, segment.range, undefined, signal)}`); previous = segment.sequence;
+      lines.push(`#EXTINF:${segment.duration},`,fileUri(await this.raw(segment.url, segment.range, undefined, signal))); previous = segment.sequence;
     }
     lines.push('#EXT-X-ENDLIST'); const file = join(dir, name + '.m3u8'); await writeFile(file, lines.join('\n'), { mode: 0o600 });
     return { file, offset: selected.offset + await this.windowAnchor(file, signal), hls: true, jumps };

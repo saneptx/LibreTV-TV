@@ -11,17 +11,18 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
 
-/** 首页大图推荐：左侧是小标签、细体大标题、信息、进度和按钮；右侧是完整的竖版海报（不裁成横幅）。
- * 自身没有底色，背后是整屏的模糊海报背景。内容跟随首页卡片的焦点切换，默认显示最近看过的一部。 */
-internal class TvHero(private val ui: TvWidgets, private val posters: TvPosterLoader, private val onPoster: (Drawable?) -> Unit) : FrameLayout(ui.activity) {
+/** 首页主推（与网页端同一版式）：整屏大图在背后（TvBackdrop），这里只放压在大图左下的小标签、粗体大标题、信息、进度、按钮和一排圆点。
+ * 内容跟随首页卡片的焦点切换；焦点停在这里的按钮上时由首页每隔几秒换下一部。海报不显示，只用来给没有剧照的影片生成柔光背景。 */
+internal class TvHero(private val ui: TvWidgets, private val posters: TvPosterLoader, private val onFeature: (Feature) -> Unit, private val onPoster: (Drawable?) -> Unit) : FrameLayout(ui.activity) {
     class Feature(val key: String, val caption: String, val title: String, val meta: String, val note: String,
         val fraction: Float?, val pic: String, val action: String, val play: () -> Unit,
-        val secondary: (() -> String)? = null, val onSecondary: (() -> Unit)? = null)
+        val secondary: (() -> String)? = null, val onSecondary: (() -> Unit)? = null, val doubanId: String = "", val tv: Boolean = true)
     private val images = List(2) { ImageView(ui.activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; alpha = 0f; importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO } }
     private var front = 0
     private val column = ui.column()
     private val caption = ui.text("", 11, Color.rgb(190, 190, 196)).apply { letterSpacing = .28f; ui.fontWeight(this, 500) }
-    private val title = ui.text("", 44).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; letterSpacing = .01f; ui.fontWeight(this, 300) }
+    private val title = ui.text("", 46).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; ui.fontWeight(this, 800); setShadowLayer(ui.px(10).toFloat(), 0f, ui.px(2).toFloat(), Color.argb(150, 0, 0, 0)) }
+    private val dots = ui.row()
     private val meta = ui.text("", 14, Color.rgb(206, 206, 212)).apply { isSingleLine = true; ellipsize = android.text.TextUtils.TruncateAt.END }
     private val bar = ProgressBar(ui.activity, null, android.R.attr.progressBarStyleHorizontal).apply {
         max = 1000; progressTintList = ColorStateList.valueOf(Color.WHITE); progressBackgroundTintList = ColorStateList.valueOf(Color.argb(60, 255, 255, 255))
@@ -35,9 +36,10 @@ internal class TvHero(private val ui: TvWidgets, private val posters: TvPosterLo
     private fun setExtra(label: String) { extra.setLabel(label) }
     init {
         visibility = View.GONE; clipChildren = false; clipToPadding = false
-        val frame = FrameLayout(ui.activity).apply { background = ui.posterBackground(14); clipToOutline = true; outlineProvider = ViewOutlineProvider.BACKGROUND; elevation = ui.px(18).toFloat() }
+        // 海报只用来取色：放在一个看不见的 1 像素容器里（加载器要求视图已挂到窗口上）
+        val frame = FrameLayout(ui.activity).apply { alpha = 0f }
         images.forEach { frame.addView(it, LayoutParams(-1, -1)) }
-        addView(frame, LayoutParams(ui.px(196), ui.px(294), Gravity.RIGHT or Gravity.CENTER_VERTICAL).apply { rightMargin = ui.px(40) })
+        addView(frame, LayoutParams(1, 1))
         val label = ui.row()
         label.addView(View(ui.activity).apply { setBackgroundColor(Color.argb(200, 255, 255, 255)) }, ui.margins(22, 1).apply { rightMargin = ui.px(10) })
         label.addView(caption)
@@ -48,13 +50,14 @@ internal class TvHero(private val ui: TvWidgets, private val posters: TvPosterLo
         column.addView(progress, ui.margins(-1, 18).apply { topMargin = ui.px(12) })
         val actions = ui.row()
         actions.addView(play, ui.margins(-2, 44).apply { rightMargin = ui.px(12) }); actions.addView(extra, ui.margins(-2, 44))
-        column.addView(actions, ui.margins(-1, -2).apply { topMargin = ui.px(22) })
-        addView(column, LayoutParams(ui.px(560), -2, Gravity.CENTER_VERTICAL or Gravity.LEFT).apply { leftMargin = ui.px(6) })
+        column.addView(actions, ui.margins(-1, -2).apply { topMargin = ui.px(18) })
+        column.addView(dots, ui.margins(-1, 6).apply { topMargin = ui.px(18) })
+        addView(column, LayoutParams(ui.px(620), -2, Gravity.BOTTOM or Gravity.LEFT).apply { leftMargin = ui.px(6); bottomMargin = ui.px(6) })
     }
     fun show(feature: Feature) {
         val changed = feature.key != current?.key
         val picture = changed || feature.pic != current?.pic
-        current = feature
+        current = feature; onFeature(feature)
         caption.setLabel(feature.caption); title.setLabel(feature.title); meta.setLabel(feature.meta); note.setLabel(feature.note); play.setLabel(feature.action)
         meta.visibility = if (feature.meta.isEmpty()) View.GONE else View.VISIBLE
         bar.visibility = if (feature.fraction != null) View.VISIBLE else View.GONE
@@ -72,11 +75,19 @@ internal class TvHero(private val ui: TvWidgets, private val posters: TvPosterLo
         if (picture) {
             val next = images[1 - front]; val previous = images[front]
             posters.load(next, feature.pic) { if (current === feature) onPoster(next.drawable) }
-            next.scaleX = 1.05f; next.scaleY = 1.05f
-            next.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(700).setInterpolator(TvMotion.out).start()
-            previous.animate().alpha(0f).setStartDelay(0).setDuration(420).start()
-            front = 1 - front
+            previous.setImageDrawable(null); front = 1 - front
         }
     }
     fun clear() { current = null }
+    /** 圆点：count 部轮播影片里现在是第 index 部；不在轮播里（焦点在某张卡片上）时传 -1 隐藏 */
+    fun page(count: Int, index: Int) {
+        dots.visibility = if (count > 1 && index >= 0) View.VISIBLE else View.INVISIBLE
+        while (dots.childCount > count) dots.removeViewAt(dots.childCount - 1)
+        while (dots.childCount < count) dots.addView(View(ui.activity), ui.margins(6, 6).apply { rightMargin = ui.px(6) })
+        for (i in 0 until dots.childCount) dots.getChildAt(i).let { dot ->
+            val on = i == index
+            dot.background = ui.background(if (on) Color.WHITE else Color.argb(90, 255, 255, 255), radius = 3)
+            dot.layoutParams = (dot.layoutParams as android.widget.LinearLayout.LayoutParams).apply { width = ui.px(if (on) 20 else 6) }
+        }
+    }
 }

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { access, mkdir, readdir, stat, statfs, rm, utimes } from 'node:fs/promises';
-import { resolve, dirname, join } from 'node:path';
+import { resolve, dirname, join, basename } from 'node:path';
 import { constants } from 'node:fs';
 import { problem } from './hls.mjs';
 export const hash = async (value) => (await import('node:crypto')).createHash('sha256').update(value).digest('hex');
@@ -20,8 +20,8 @@ export function run(executable, args, { signal, env = {}, timeout = 120_000, onS
     child.stdout.on('data', (b) => { if (binary) { size += b.length; if (size <= maxBytes) chunks.push(b); else stop(); } else stdout = (stdout + b).slice(-2 * 1024 * 1024); });
     child.stderr.on('data', (b) => { stderr = (stderr + b).slice(-8192); onStderr?.(b.toString()); });
     const cleanup = () => { clearTimeout(timer); clearTimeout(killTimer); signal?.removeEventListener('abort', stop); };
-    child.once('error', (error) => { cleanup(); reject(problem(503, `处理工具无法启动：${executable.split('/').pop()} (${error.code || 'error'})`)); });
-    child.once('close', (code, sig) => { cleanup(); if (signal?.aborted) reject(aborted()); else if (code !== 0) reject(Object.assign(problem(502, `电脑视频处理失败：${executable.split('/').pop()} (${sig || code})`), { diagnostic: stderr })); else if (binary && size > maxBytes) reject(problem(502, '处理工具输出过大')); else resolve({ stdout: binary ? Buffer.concat(chunks) : stdout, stderr }); });
+    child.once('error', (error) => { cleanup(); reject(problem(503, `处理工具无法启动：${basename(executable)} (${error.code || 'error'})`)); });
+    child.once('close', (code, sig) => { cleanup(); if (signal?.aborted) reject(aborted()); else if (code !== 0) reject(Object.assign(problem(502, `电脑视频处理失败：${basename(executable)} (${sig || code})`), { diagnostic: stderr })); else if (binary && size > maxBytes) reject(problem(502, '处理工具输出过大')); else resolve({ stdout: binary ? Buffer.concat(chunks) : stdout, stderr }); });
   });
 }
 export class WorkQueue {
@@ -49,12 +49,25 @@ export class WorkQueue {
     } } finally { this.running = false; }
   }
 }
+/** 项目内 FFmpeg 的位置（不修改系统软件） */
+export const localFfmpeg = (root) => process.platform === 'win32' ? join(root, 'ffmpeg/bin/ffmpeg.exe') : join(root, 'ffmpeg/usr/bin/ffmpeg');
+/**
+ * 滤镜参数里的文件路径。Windows 路径统一成正斜杠；盘符冒号是滤镜选项分隔符，需转义并加引号。
+ * 不含特殊字符的路径原样返回，Linux 上的滤镜文本保持不变。
+ */
+export function filterPath(file, quote = false) {
+  const path = String(file).replace(/\\/g, '/');
+  if (/[\n\r']/.test(path)) throw problem(400, '滤镜文件路径包含不支持的字符');
+  return quote || /[:,;\[\] ]/.test(path) ? `'${path.replace(/:/g, '\\:')}'` : path;
+}
 export async function toolConfig(options = {}) {
   const root = resolve(options.toolsDir || '.desktop-server/tools');
-  const local = join(root, 'ffmpeg/usr/bin/ffmpeg');
+  const windows = process.platform === 'win32', exe = windows ? '.exe' : '';
+  // Windows：setup-tools 把含 libplacebo 的完整版 FFmpeg 解包到 tools/ffmpeg/bin；Linux：解包的 Ubuntu 软件包
+  const local = localFfmpeg(root);
   const ffmpeg = options.ffmpeg || (await exists(local) ? local : 'ffmpeg');
-  const ffprobe = options.ffprobe || (ffmpeg.includes('/') ? join(dirname(ffmpeg), 'ffprobe') : 'ffprobe');
-  const sr = options.sr || join(root, 'realesrgan/realesrgan-ncnn-vulkan');
+  const ffprobe = options.ffprobe || (/[\\/]/.test(ffmpeg) ? join(dirname(ffmpeg), 'ffprobe' + exe) : 'ffprobe');
+  const sr = options.sr || join(root, 'realesrgan/realesrgan-ncnn-vulkan' + exe);
   const models = options.models || join(root, 'realesrgan/models');
   const env = { LD_LIBRARY_PATH: [join(dirname(ffmpeg), '../lib/x86_64-linux-gnu'), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':') };
   if (options.vulkanIcd) env.VK_ICD_FILENAMES = options.vulkanIcd;
@@ -70,6 +83,8 @@ export async function toolConfig(options = {}) {
   const config = { ffmpeg, ffprobe, sr, models, env, model, shader, engine: fast ? 'libplacebo-vulkan' : 'ncnn-vulkan', modelSignature, scale: model === 'realesr-animevideov3' ? 2 : 4, encoder: options.encoder || 'h264_nvenc', tile: options.tile || 512, gpu: String(options.gpu ?? 0), targetHeight: options.targetHeight ?? 'auto', chunkSeconds: options.chunkSeconds || 8 };
   if (!['h264_nvenc', 'libx264'].includes(config.encoder) || !['auto',720,1080,2160].includes(config.targetHeight) || ![1,2,4,8].includes(config.chunkSeconds) || ![128,256,512].includes(config.tile)) throw problem(400, '电脑处理参数无效');
   await run(ffprobe, ['-version'], { env });
+  // FFmpeg 7.1.1+ 默认按扩展名校验 HLS 分片，本地缓存的分片统一存为 .bin，需要关闭该校验；旧版没有此选项
+  config.hlsOptions = (await run(ffmpeg, ['-hide_banner','-h','demuxer=hls'], { env })).stdout.includes('extension_picky') ? ['-extension_picky','0'] : [];
   await run(ffmpeg, ['-hide_banner','-loglevel','error','-f','lavfi','-i','color=s=320x180:r=24','-frames:v','1','-c:v',config.encoder,'-f','null','-'], { env, timeout: 15_000 });
   if(fast) await run(ffmpeg,['-hide_banner','-loglevel','error',...vulkanDevice(config),'-f','lavfi','-i','testsrc2=s=320x180:r=24','-frames:v','2','-vf',vulkanFilter(config,{width:320,height:180},{width:640,height:360}),'-f','null','-'],{env,timeout:30_000});
   // 实际试编码确认本机可用的 HEVC 编码器；设备能硬解时优先使用，同画质码率更低
@@ -80,12 +95,11 @@ export async function toolConfig(options = {}) {
 }
 export function vulkanDevice(tools) { return ['-init_hw_device',`vulkan=vk:${tools.gpu}`,'-filter_hw_device','vk']; }
 export function vulkanFilter(tools, source, target, frameRate) {
-  if(/[\n\r'\\]/.test(tools.shader)) throw problem(400,'Shader path contains unsupported characters');
-  const path=tools.shader.replace(/:/g,'\\:');
+  const path=filterPath(tools.shader,true);
   const filters = ['format=yuv420p', 'hwupload'];
   let current = source;
   const upscale = (width, height) => {
-    filters.push(`libplacebo=w=${width}:h=${height}${frameRate ? ':fps='+frameRate : ''}:custom_shader_path='${path}':format=yuv420p`);
+    filters.push(`libplacebo=w=${width}:h=${height}${frameRate ? ':fps='+frameRate : ''}:custom_shader_path=${path}:format=yuv420p`);
     frameRate = undefined;
     current = { width, height };
   };

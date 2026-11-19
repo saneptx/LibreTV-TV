@@ -82,6 +82,9 @@ function batches(changes: SyncChange[]): SyncChange[][] {
 /** 与电脑同步一次：先推送本机修改，再把电脑上的更新拉完 */
 export async function syncOnce(server: string, transport: SyncTransport, signal?: AbortSignal): Promise<{ pushed: number; pulled: number }> {
   let state = loadState(server);
+  // 本机资料库是空的、同步进度却显示同步过：资料库被系统清掉或重建了（浏览器数据损坏、清除数据等）。
+  // 从头再拉一遍，把其他设备上还留着的记录取回来。
+  if (state.rev !== 0 && !(await Promise.all([...(Object.keys(SYNC_TABLES) as SyncTable[]).map((t) => tableOf(t).count()), db.tombstones.count()])).some(Boolean)) state = { server, rev: 0, pushedAt: 0 };
   const startedAt = Date.now();
   let queue = batches(await collectChanges(state.pushedAt));
   let pushed = 0, pulled = 0, resent = false;

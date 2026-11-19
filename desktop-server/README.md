@@ -36,6 +36,36 @@ npm run desktop:server -- --host 0.0.0.0
 
 换集、换源、退出播放会取消子进程并释放前一个任务；服务还会在 30 分钟没有媒体请求后清理任务，最多 8 个并发任务。电脑中断时不会悄悄改成直连，设备提供「重试电脑串流」与「切回独立直连」，保留当前影片与播放位置。服务重启会清空播放任务，需重试创建。
 
+## Windows 运行
+
+已在 Windows 11 + RTX 3060 Laptop + Node.js 26 上验证。需要 NVIDIA 显卡和已安装的 Node.js 22.16+。
+
+双击项目根目录的 `start_windows.cmd`，或在终端执行：
+
+```bash
+node start_all.mjs
+```
+
+脚本依次安装依赖、构建网页、准备串流环境，然后同时启动网页服务（8080）和电脑串流服务（8090，监听局域网）。`--no-stream` 只启动网页；`--no-build` 跳过网页构建。Linux / macOS 也可使用同一脚本（macOS 没有 NVENC，请加 `--no-stream`）。
+
+- **FFmpeg**：超分需要 libplacebo。系统 FFmpeg 没有该滤镜时（例如 essentials 精简版），`desktop:setup` 会下载校验 FFmpeg 7.1.1 完整版并解包到 `.desktop-server/tools/ffmpeg`，不修改系统已安装的软件。
+- **防火墙**：电视 / 手机要从局域网访问，需在 Windows 防火墙放行 TCP 8080 和 8090。以管理员身份执行一次：`netsh advfirewall firewall add rule name="LibreTV" dir=in action=allow protocol=TCP localport=8080,8090 profile=private`。
+- **代理 Fake-IP**：检测到 198.18.0.0/15 的代理虚拟网卡时，启动脚本自动为串流服务加上 `--allow-fake-ip`。
+- **暂不支持**：高质量模式（`--quality`，Real-ESRGAN）的自动配置；默认的 FSRCNNX 超分、去广告、去水印、多来源比对和电脑片库均可用。
+
+验证命令与 Linux 相同：`npm run desktop:test`、`npm run desktop:check`，以及 `node desktop-server/check-overlay.mjs`、`check-compare.mjs`、`check-pipeline.mjs`。
+
+## 资料同步
+
+观看历史、各集进度、搜索记录和片库收藏以电脑串流服务为中心在设备间同步，资料保存在 `.desktop-server/sync.json`。各设备数据仍存本机，电脑没开时照常使用，连上后自动合并：每条记录以修改时间为准，新的覆盖旧的，删除也会同步。只在能连到电脑的网络内生效。
+
+| 设备 | 如何接入 |
+| --- | --- |
+| 电视 / 投影仪 App | 「片源管理」里填好电脑地址和配对码即可，与播放模式无关（独立直连时也同步） |
+| 电脑、手机浏览器 | 打开这台电脑的网页（8080）即可，无需填写配对码：网页服务用本机的配对码经 `/api/sync` 代为转发 |
+
+浏览器端启动时同步一次，本机有修改约 3 秒后推送，之后每分钟拉取一次。网页开启了访问验证时，登录后才会同步。网页服务与串流服务不在同一目录或同一台电脑时，用环境变量 `DESKTOP_SERVER_URL`、`DESKTOP_PAIRING_TOKEN` 指定。协议：`POST /v1/sync`，见 `sync.mjs`。
+
 ## 模拟器固定测试源
 
 测试源与电脑串流服务是两个独立进程：8091 模拟网络片源，8090 模拟电脑中转。因此停掉 8090 后，设备仍可直接访问测试源。测试视频由 FFmpeg 生成，不下载或存储第三方影片。
@@ -179,6 +209,7 @@ node desktop-server/check-pipeline.mjs
 - `POST /v1/downloads`：`url`、`title`、`subtitle`、`meta`、`superResolution`、`adFilter`、`overlayRemoval`、`decoders` → 后台按整集处理并保存到 `.desktop-server/library/<id>/`；同一片源与处理设置只保存一份。
 - `DELETE /v1/downloads/:id`：取消并删除文件。
 - `POST /v1/sessions` 命中已完成的片库条目（同一地址与处理设置）时直接读取保存的分段，状态为 ready，标注「电脑片库」。
+- `POST /v1/sessions` 也可只带 `download`（片库条目编号）和可选的 `position`：按下载时记录的地址与处理设置播放，不再检查片源地址，供网页「已下载」页面使用；条目不存在或未完成返回 404。
 - 下载逐段进行、低于播放优先级，每段失败重试 3 次（2/4/8 秒），预先并行下载之后几段的源分片；服务重启后续传未完成的条目。
 - 静止横幅广告（0.6.0 补充）：只在一段时间内出现、位置不动的宽幅文字（如《复仇者联盟3》最大资源约 15–20 分钟处顶部的博彩字条），全片抽样难以抽到。每段编码前在段首、段尾各取两帧（跨约 7 秒），画面上方 22% 内有连续 ≥4 行、静止且密集的边缘，横向铺开超过四分之一，并且亮字暗底（局部明暗差大的像素 ≥12%），画面其余部分在变化时，模糊这一条。只看上方，避开对白字幕；实测该片 4 段广告全部识别，三部影片 32 个无广告采样点无误判（片尾字幕、月面、黑边分界均不触发）。
 

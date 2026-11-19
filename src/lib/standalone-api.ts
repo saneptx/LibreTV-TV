@@ -4,7 +4,8 @@ import { decodeNativeBytes, encodeNativeBytes, nativeFetch, nativeRpc } from './
 import { createQualityProbe } from './quality-probe-core';
 import { parseSubscriptionJson, parseSubscriptionPayload } from './tvbox-parser';
 import { sourceCache, searchCacheKey } from './source-cache';
-import type { AuthStatusResponse, SearchResponse, SourceConfig, SourceSearchOutcome, VideoDetail } from './types';
+import { BACKDROP_UA, backdropUrl, hotListPath, isHotListId, parseHotList, pickBackdrop, SIXTY_BASE, SIXTY_FALLBACK } from './hot-list-core';
+import type { AuthStatusResponse, DoubanItem, SearchResponse, SourceConfig, SourceSearchOutcome, VideoDetail } from './types';
 
 export function standaloneStatus(): AuthStatusResponse {
   return {
@@ -122,4 +123,37 @@ export async function standaloneSourceList(url: string) {
   const res = await nativeFetch(url);
   if (!res.ok) throw new Error(`订阅地址返回 HTTP ${res.status}`);
   return parseSubscriptionPayload(parseSubscriptionJson(await res.text()));
+}
+
+/** 影视热榜：设备直接向 60s API 取（与网页服务端同一套解析），本次运行内缓存一小时 */
+const hotLists = new Map<string, { items: DoubanItem[]; at: number }>();
+export async function standaloneHotList(id: string, signal?: AbortSignal): Promise<{ items: DoubanItem[] }> {
+  if (!isHotListId(id)) throw new Error('未知榜单');
+  const cached = hotLists.get(id);
+  if (cached && Date.now() - cached.at < 3600_000) return { items: cached.items };
+  let last: unknown;
+  for (const base of [SIXTY_BASE, SIXTY_FALLBACK]) {
+    try {
+      const res = await nativeFetch(base + hotListPath(id), { headers: { Accept: 'application/json' }, signal, timeoutMs: 8000 });
+      if (!res.ok) throw new Error(`榜单接口返回 HTTP ${res.status}`);
+      const items = parseHotList(id, await res.json());
+      hotLists.set(id, { items, at: Date.now() });
+      return { items };
+    } catch (error) { if (signal?.aborted) throw error; last = error; }
+  }
+  throw last instanceof Error ? last : new Error('榜单获取失败');
+}
+
+/** 主推大图的横版剧照：设备直接问豆瓣；拿不到时为 null */
+const backdrops = new Map<string, string | null>();
+export async function standaloneBackdrop(id: string, isTv: boolean, signal?: AbortSignal): Promise<{ backdrop: string | null }> {
+  if (!/^\d{1,12}$/.test(id)) return { backdrop: null };
+  if (backdrops.has(id)) return { backdrop: backdrops.get(id)! };
+  let backdrop: string | null = null;
+  try {
+    const res = await nativeFetch(backdropUrl(id, isTv), { headers: { 'User-Agent': BACKDROP_UA, Referer: 'https://m.douban.com/', Accept: 'application/json' }, signal, timeoutMs: 8000 });
+    if (res.ok) backdrop = pickBackdrop(((await res.json()) as { photos?: unknown }).photos);
+  } catch (error) { if (signal?.aborted) throw error; }
+  backdrops.set(id, backdrop);
+  return { backdrop };
 }

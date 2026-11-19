@@ -26,10 +26,10 @@ try {
   console.log('RUN '+variant.name);current={encoding:0,maxEncoding:0,downloads:0,downloadsDuringEncoding:0};
   const config={...tools,chunkSeconds:variant.chunkSeconds};
   const processor=createProcessor(config,{cacheDir:join(dir,variant.name),prefetch:0,overlapDownloads:variant.overlapDownloads,runner:async(executable,args,options)=>{
-   const encoding=executable===tools.ffmpeg&&args.includes('-vf');if(encoding){current.encoding++;current.maxEncoding=Math.max(current.maxEncoding,current.encoding);}
+   const encoding=executable===tools.ffmpeg&&args.includes('-vf')&&!args.includes('rawvideo');if(encoding){current.encoding++;current.maxEncoding=Math.max(current.maxEncoding,current.encoding);}
    try{return await run(executable,args,options);}finally{if(encoding)current.encoding--;}
   }});
-  const began=performance.now();pipeline=processor.create({id:variant.name,headers:{}},{url},network);await pipeline.preparing;
+  const began=performance.now();pipeline=processor.create({id:variant.name,headers:{}},{url,overlayRemoval:false},network);await pipeline.preparing;
   assert.equal(pipeline.status().state,'ready');const startupSeconds=(performance.now()-began)/1000;
   const count=Math.ceil((pipeline.duration-.000001)/pipeline.chunkDuration);
   const files=await Promise.all(Array.from({length:count},(_,index)=>pipeline.segment(index)));

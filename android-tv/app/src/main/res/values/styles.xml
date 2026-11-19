@@ -9,6 +9,14 @@
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:windowBackground">#000000</item>
     </style>
+    <style name="Theme.SuperTV.Phone" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#FFFFFF</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#101012</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
     <!-- 面板进出场：居中面板从略大处收拢并淡入；底部抽屉自下滑入 -->
     <style name="Motion.Lumen.Dialog" parent="">
         <item name="android:windowEnterAnimation">@anim/lumen_dialog_in</item>

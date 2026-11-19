@@ -3,7 +3,7 @@ package org.libretv.tv
 /** 对齐 src/lib/m3u8.ts 的三步保守过滤；保留 KEY/MAP 与正片时间轴边界。
  * 另可删除数据页按编码特征/已学习指纹标出的分片行，并回报原片时间轴上被删除的区间。
  */
-internal object PlaylistFilter {
+object PlaylistFilter {
     private const val DISC = "#EXT-X-DISCONTINUITY"
     private val adUrl = Regex("adjump|advert|/ads?/", RegexOption.IGNORE_CASE)
     private val segmentTags = listOf("#EXTINF", "#EXT-X-BYTERANGE", "#EXT-X-PROGRAM-DATE-TIME", "#EXT-X-GAP", "#EXT-X-BITRATE")

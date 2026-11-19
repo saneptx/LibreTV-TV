@@ -12,7 +12,8 @@ if (!existsSync(join(root, 'node_modules/next/dist/bin/next'))) {
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(join(stage, 'src/app'), { recursive: true });
 for (const dir of ['components', 'lib']) cpSync(join(root, 'src', dir), join(stage, 'src', dir), { recursive: true });
-for (const name of ['tv', 'watch', 'native-tv', 'layout.tsx', 'globals.css']) {
+// 电视用 /tv、/watch、/native-tv；手机用首页、片库和同一个播放页
+for (const name of ['tv', 'watch', 'native-tv', 'page.tsx', 'library', 'error.tsx', 'global-error.tsx', 'layout.tsx', 'globals.css']) {
   cpSync(join(root, 'src/app', name), join(stage, 'src/app', name), { recursive: true });
 }
 for (const name of ['public', 'package.json', 'tsconfig.json', 'next-env.d.ts', 'postcss.config.mjs', 'tailwind.config.ts', 'source.json']) {

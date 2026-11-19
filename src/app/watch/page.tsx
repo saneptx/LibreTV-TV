@@ -339,7 +339,7 @@ function WatchContent() {
               <label className="flex items-center gap-1.5 text-xs text-muted ml-auto cursor-pointer">
                 <input
                   type="checkbox"
-                  className="h-3.5 w-3.5 accent-[#2563eb]"
+                  className="h-3.5 w-3.5 accent-accent"
                   data-tv-focus={tvMode || undefined}
                   checked={store.autoplayNext}
                   onChange={(e) => store.updateSettings({ autoplayNext: e.target.checked })}

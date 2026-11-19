@@ -1,10 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,readdir} from 'node:fs/promises';
-import {join,dirname} from 'node:path';
+import {join,dirname,basename} from 'node:path';
 import {tmpdir} from 'node:os';
 import {Readable} from 'node:stream';
-import {createProcessor} from './processing.mjs';
+import {createProcessor,fileUri} from './processing.mjs';
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const until=async(p)=>{let timer;try{return await Promise.race([p,new Promise((_,j)=>timer=setTimeout(()=>j(Error('等待流水线事件超时')),3000))]);}finally{clearTimeout(timer);}};
 function response(body){const r=Readable.from([Buffer.from(body)]);r.statusCode=200;r.headers={'content-length':Buffer.byteLength(body),'content-type':'application/octet-stream'};return {response:r};}
@@ -15,7 +15,7 @@ async function fixture(t,{download,encode,prefetch=4,startupBufferSeconds=0,clea
  const processor=createProcessor(tools,{cacheDir:root,prefetch,startupBufferSeconds,runner:async(executable,args,options)=>{
    if(executable===tools.ffprobe)return {stdout:JSON.stringify(metadata)};
    if(args.includes('rawvideo'))return {stdout:frames?frames():Buffer.alloc(0)};
-   const file=args.at(-1),index=+dirname(file).split('/').at(-1);calls.push({type:'encode',index,vf:args[args.indexOf('-vf')+1]});
+   const file=args.at(-1),index=+basename(dirname(file));calls.push({type:'encode',index,vf:args[args.indexOf('-vf')+1]});
    await encode?.(index,options.signal);if(options.signal.aborted)throw new DOMException('取消','AbortError');
    await writeFile(file,'encoded');return {stdout:''};
  }});
@@ -76,4 +76,8 @@ test('设备给的列表分片在电脑上被拒（按 IP 签名）时，改用�
  session.network.open=async(url,range,signal)=>{ if(url.includes('sign=device')){const r=Readable.from([]);r.statusCode=403;r.headers={};return {response:r,url};} return original(url,range,signal); };
  await session.preparing;assert.equal(session.info.state,'ready',session.info.error);
  assert(session.info.devicePlaylistRejected);assert(calls.some(c=>c.type==='playlist'),'应重新下载媒体列表');
+});
+
+test('本地播放列表的文件地址不含反斜杠，Windows 上加密片源的密钥路径可被 FFmpeg 读取',()=>{
+ assert.equal(fileUri('C:\\cache\\raw\\k.bin'),'file:C:/cache/raw/k.bin');assert.equal(fileUri('/cache/raw/k.bin'),'file:/cache/raw/k.bin');
 });

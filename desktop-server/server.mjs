@@ -41,11 +41,23 @@ export function rewritePlaylist(body, base, asset) {
   }).join('\n');
 }
 
-export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = false, idleMs = 30 * 60_000, lookupHost = lookup, processor = null, libraryDir, syncFile } = {}) {
+export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = false, idleMs = 30 * 60_000, lookupHost = lookup, processor = null, libraryDir, syncFile, pin, deviceName = 'PC', now = () => Date.now() } = {}) {
   if (typeof token !== 'string' || token.length < 24 || token.length > 256) throw new Error('需要至少 24 字符的配对码');
   const secret = Buffer.from(`Bearer ${token}`), sessions = new Map(), comparisons = new Map(), compareResults = new Map();
   const stats = { created: 0, mediaRequests: 0, playlistRequests: 0, rangeRequests: 0, bytes: 0 };
   const testOrigin = allowTestOrigin ? new URL(allowTestOrigin).origin : null;
+  // 电视首次连接：在电视上输入电脑窗口里显示的 6 位配对码，换取长配对码（之后电视自己保存，不用再输）。
+  // 6 位数字只有一百万种可能，所以限制尝试次数：5 分钟内输错 5 次就锁 5 分钟。
+  const pinSecret = typeof pin === 'string' && /^\d{6}$/.test(pin) ? Buffer.from(pin) : null, pinFailures = [];
+  function exchangePin(candidate) {
+    if (!pinSecret) throw failure(404, '这台电脑没有开启配对码连接');
+    const at = now();
+    while (pinFailures.length && at - pinFailures[0] > 5 * 60_000) pinFailures.shift();
+    if (pinFailures.length >= 5) throw failure(429, '配对码输错次数过多，请 5 分钟后再试');
+    const given = Buffer.from(typeof candidate === 'string' ? candidate.replace(/\s/g, '') : '');
+    if (given.length !== pinSecret.length || !timingSafeEqual(given, pinSecret)) { pinFailures.push(at); throw failure(403, '配对码不对，请核对电脑窗口里显示的 6 位数字'); }
+    return token;
+  }
   function authorized(req) {
     const candidate = Buffer.from(req.headers.authorization || '');
     return candidate.length === secret.length && timingSafeEqual(candidate, secret);
@@ -131,11 +143,19 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
     }
     let abandoned;
     try {
-      if (!authorized(req)) throw failure(401, '电脑服务配对码不匹配');
       const path = new URL(req.url, 'http://desktop.local').pathname;
+      // 发现与首次配对不需要长配对码；只接受应用自己的请求（浏览器网页发起的请求都带 Origin）
+      if (path === '/v1/hello' && req.method === 'GET') { send(res, 200, { service: 'LibreTV Desktop', protocol: 1, name: deviceName, pairing: pinSecret ? 'pin' : 'token' }); return; }
+      if (path === '/v1/pair' && req.method === 'POST') {
+        if (req.headers.origin) throw failure(403, '不支持的来源');
+        send(res, 200, { protocol: 1, token: exchangePin((await readJson(req))?.pin) }); return;
+      }
+      if (!authorized(req)) throw failure(401, '电脑服务配对码不匹配');
       if (path === '/v1/status' && req.method === 'GET') {
         send(res, 200, { protocol: 1, service: 'LibreTV Desktop', sync: 1, processing: processor ? 'enhance' : 'relay', capabilities: processor ? { adRemoval: true, deviceAdSegments: true, devicePlaylists: true, crossSourceCompare: true, overlayRemoval: true, downloads: true, codecs: Object.keys(processor.tools.codecs || { h264: true }), superResolution: true, superResolutionToggle: true, transcoding: true, caching: true, model: processor.tools.model, encoder: processor.tools.encoder, targetHeight: processor.tools.targetHeight, upscalePolicy: processor.tools.targetHeight === 'auto' ? 'next-tier' : 'fixed', startupBufferSeconds:processor.startupBufferSeconds, prefetchSegments:processor.prefetch, bitratePolicy:'bounded-vbr', chunkSeconds:processor.tools.chunkSeconds, downloadPipeline:processor.overlapDownloads ? 'overlap' : 'serial' } : { adRemoval: false, superResolution: false }, activeSessions: sessions.size, ...stats }); return;
       }
+      // 电脑端程序读取当前的 6 位配对码显示给用户（需要长配对码，只有本机程序拿得到）
+      if (path === '/v1/pairing' && req.method === 'GET') { send(res, 200, { pin: pinSecret ? pinSecret.toString() : null, name: deviceName }); return; }
       if (path === '/v1/sync' && req.method === 'POST') {
         syncReady ??= sync.load();
         await syncReady;
@@ -188,9 +208,16 @@ export function createDesktopServer({ token, allowTestOrigin, allowFakeIp = fals
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 3 * 1024 * 1024) throw failure(413, '请求过大'); }
         let input; try { input = JSON.parse(body); } catch { throw failure(400, '请求格式无效'); }
+        // 按片库条目播放（网页「已下载」）：地址和处理设置取自下载时的记录，片源失效或断网也能看
+        let stored;
+        if (input && input.download !== undefined) {
+          await libraryReady; stored = typeof input.download === 'string' ? library?.get(input.download) : undefined;
+          if (!stored || stored.state !== 'done') throw failure(404, '下载不存在或尚未完成');
+          input = { ...stored.input, position: input.position };
+        }
         if (!input || typeof input.url !== 'string' || input.superResolution !== undefined && typeof input.superResolution !== 'boolean' || input.position !== undefined && (!Number.isFinite(input.position) || input.position < 0)
           || !validPlaylists(input.playlists) || !validLines(input.adSegments) || !validDecoders(input.decoders) || input.overlayRemoval !== undefined && typeof input.overlayRemoval !== 'boolean') throw failure(400, '播放参数无效');
-        await destination(input.url);
+        if (!stored) await destination(input.url);
         if (sessions.size >= 8) throw failure(429, '电脑服务的播放任务已满');
         const headers = {};
         for (const [key, value] of Object.entries(input.headers || {})) {

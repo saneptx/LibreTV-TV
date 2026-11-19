@@ -112,8 +112,31 @@ export function SourceManagerDrawer({ open, onClose }: { open: boolean; onClose:
     <Drawer
       open={open}
       onClose={onClose}
-      title="设置"
+      title={SECONDARY_TABS[primary].find((t) => t.id === current)?.label ?? '设置'}
       resetScrollKey={current}
+      sidebar={
+        <nav aria-label="设置" className="space-y-5">
+          <p className="px-2 text-2xl font-bold tracking-tight text-content">设置</p>
+          {PRIMARY_TABS.map((group) => (
+            <div key={group.id}>
+              <p className="px-2 mb-1.5 text-[11px] font-medium tracking-wider text-faint">{group.label}</p>
+              <div className="space-y-0.5">
+                {SECONDARY_TABS[group.id].map((tab) => {
+                  const active = primary === group.id && current === tab.id;
+                  return (
+                    <button key={tab.id} type="button" aria-current={active ? 'page' : undefined}
+                      className={cn('w-full text-left px-3 py-2 rounded-xl text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+                        active ? 'bg-accent text-on-accent font-medium' : 'text-muted hover:text-content hover:bg-hover')}
+                      onClick={() => { setPrimary(group.id); setSecondary((prev) => ({ ...prev, [group.id]: tab.id })); }}>
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+      }
       subheader={
         <div className="space-y-2">
           <TabRow tabs={PRIMARY_TABS} value={primary} onChange={setPrimary} variant="primary" ariaLabel="设置分类" />
@@ -163,7 +186,7 @@ function TabRow<T extends string>({
     <div
       role="tablist"
       aria-label={ariaLabel}
-      className={cn('flex w-full gap-1', variant === 'primary' && 'p-0.5 bg-chip rounded-lg')}
+      className={cn('flex w-full gap-1', variant === 'primary' && 'p-1 bg-chip rounded-full')}
       onKeyDown={(e) => {
         if (e.key === 'ArrowRight') {
           e.preventDefault();
@@ -183,15 +206,15 @@ function TabRow<T extends string>({
             aria-selected={active}
             className={cn(
               // 两级导航都等宽撑满一行（原先二级按内容宽度、超宽才横滚，与一级不一致）
-              'flex-1 min-w-0 inline-flex items-center justify-center gap-1 whitespace-nowrap rounded-md transition-colors',
+              'flex-1 min-w-0 inline-flex items-center justify-center gap-1 whitespace-nowrap rounded-full transition-colors',
               variant === 'primary'
                 ? cn(
                     'px-2 py-1.5 text-xs',
-                    active ? 'bg-surface-raised text-accent font-medium shadow-sm' : 'text-muted hover:text-content'
+                    active ? 'bg-accent text-on-accent font-medium' : 'text-muted hover:text-content'
                   )
                 : cn(
                     'px-2.5 py-1 text-xs',
-                    active ? 'bg-accent/10 text-accent font-medium' : 'text-muted hover:text-content hover:bg-hover'
+                    active ? 'bg-hover text-content font-medium' : 'text-muted hover:text-content hover:bg-hover'
                   )
             )}
             onClick={() => onChange(t.id)}
@@ -484,7 +507,7 @@ function VodSourceRow({
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium text-content truncate">
             {api.name}
-            {api.isAdult && <span className="text-pink-400 text-xs ml-1">(18+)</span>}
+            {api.isAdult && <span className="text-faint text-xs ml-1">(18+)</span>}
             {isEnv && (
               <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-chip text-faint align-middle">
                 部署者预置
@@ -561,7 +584,7 @@ function PlaybackPanel() {
   return (
     <section>
       <SectionTitle title="播放与过滤" />
-      <div className="space-y-3">
+      <div className="settings-group">
         <ToggleRow
           label="广告切片过滤"
           description="剔除播放列表中的广告分片段落（按分片 URL 特征、片头插入与长片间超短中插识别，不动 DISCONTINUITY 时间轴）"
@@ -601,7 +624,7 @@ function VideoCachePanel() {
   };
 
   return (
-    <div className="space-y-3 pt-3 mt-3 border-t border-line">
+    <div className="settings-group mt-5">
       <ToggleRow
         label="片段本地缓存"
         description="暂停或观看时把后续分片缓存到浏览器本地，二次播放与断网卡顿时直接命中（存储于本机，不计入配置导出）"
@@ -696,7 +719,7 @@ function HomePanel() {
   return (
     <section>
       <SectionTitle title="首页与内容过滤" />
-      <div className="space-y-3">
+      <div className="settings-group">
         <ToggleRow
           label="成人内容过滤"
           description="过滤“伦理片”等分类的结果"

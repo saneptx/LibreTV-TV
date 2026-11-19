@@ -19,6 +19,7 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "start:all": "node start_all.mjs",
     "desktop:server": "node desktop-server/start.mjs",
     "desktop:test": "node --test desktop-server/*.test.mjs",
     "desktop:setup": "node desktop-server/setup-tools.mjs",

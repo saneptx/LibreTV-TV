@@ -7,11 +7,11 @@ import { createReadStream } from 'node:fs';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { toolConfig, run } from './runtime.mjs';
+import { toolConfig, run, filterPath } from './runtime.mjs';
 import { createProcessor } from './processing.mjs';
 process.chdir(resolve(import.meta.dirname, '..'));
 const dir = await mkdtemp(join(tmpdir(), 'libretv-overlay-')), tools = await toolConfig();
-const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc', report = resolve('.desktop-server');
+const font = filterPath(process.platform === 'win32' ? join(process.env.SystemRoot || 'C:\\Windows', 'Fonts/msyhbd.ttc') : '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc'), report = resolve('.desktop-server');
 const ffmpeg = (...args) => run(tools.ffmpeg, ['-hide_banner', '-loglevel', 'error', ...args], { env: tools.env, timeout: 600_000 });
 let upstream, session;
 try {

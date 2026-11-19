@@ -28,6 +28,7 @@ export function Drawer({
   subheader,
   closeOnOverlay = true,
   resetScrollKey,
+  sidebar,
 }: {
   open: boolean;
   onClose: () => void;
@@ -41,6 +42,8 @@ export function Drawer({
   closeOnOverlay?: boolean;
   /** 该值变化时内容区滚回顶部（如切换设置分组 / 面板） */
   resetScrollKey?: string;
+  /** 提供后改为居中的大面板：宽屏左侧显示这栏导航（设置页用），窄屏不显示，由 subheader 代替 */
+  sidebar?: ReactNode;
 }) {
   const [mounted, setMounted] = useState(open);
   const [entered, setEntered] = useState(false);
@@ -148,26 +151,31 @@ export function Drawer({
         aria-label={title}
         tabIndex={-1}
         className={cn(
-          'absolute right-0 top-0 h-full w-full bg-surface-raised border-l border-line flex flex-col outline-none',
-          'transition-transform duration-200 ease-out',
-          width,
-          entered ? 'translate-x-0' : 'translate-x-full'
+          'absolute outline-none bg-surface-raised flex',
+          sidebar
+            ? cn('inset-0 md:inset-auto md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-[min(980px,calc(100vw-48px))] md:h-[min(760px,calc(100vh-48px))]',
+                'md:rounded-3xl md:border md:border-line md:shadow-2xl md:shadow-black/50 overflow-hidden transition-[opacity,transform] duration-200 ease-out',
+                entered ? 'opacity-100 md:scale-100' : 'opacity-0 md:scale-[0.97]')
+            : cn('right-0 top-0 h-full w-full border-l border-line flex-col transition-transform duration-200 ease-out', width, entered ? 'translate-x-0' : 'translate-x-full')
         )}
       >
-        <div className="shrink-0 px-4 py-2.5 border-b border-line flex items-center justify-between">
-          <h2 className="font-semibold text-content">{title}</h2>
+        {sidebar && <aside className="hidden md:flex flex-col w-60 shrink-0 bg-card border-r border-line p-4 overflow-y-auto scrollbar-thin">{sidebar}</aside>}
+        <div className={cn('flex flex-col min-w-0', sidebar ? 'flex-1' : 'contents')}>
+        <div className={cn('shrink-0 flex items-center justify-between', sidebar ? 'px-6 pt-5 pb-3' : 'px-4 py-2.5 border-b border-line')}>
+          <h2 className={cn('text-content', sidebar ? 'text-xl font-bold tracking-tight' : 'font-semibold')}>{title}</h2>
           <button
-            className="p-1.5 rounded-md text-muted hover:text-content hover:bg-hover transition-colors"
+            className="w-8 h-8 flex items-center justify-center rounded-full bg-chip text-muted hover:text-content hover:bg-hover transition-colors"
             onClick={onClose}
             aria-label="关闭"
           >
             <Icon name="close" />
           </button>
         </div>
-        {subheader && <div className="shrink-0 px-4 py-2.5 border-b border-line bg-surface-raised">{subheader}</div>}
+        {subheader && <div className={cn('shrink-0 px-4 py-2.5 border-b border-line bg-surface-raised', !!sidebar && 'md:hidden')}>{subheader}</div>}
         {/* 唯一滚动区：内容再长也只在这一层滚动，避免与列表内滚形成嵌套滚动 */}
-        <div ref={contentRef} className="flex-1 min-h-0 overflow-y-auto scrollbar-thin px-4 pt-4 pb-6">
+        <div ref={contentRef} className={cn('flex-1 min-h-0 overflow-y-auto scrollbar-thin pb-6', sidebar ? 'px-4 md:px-6 pt-3' : 'px-4 pt-4')}>
           {children}
+        </div>
         </div>
       </div>
     </div>

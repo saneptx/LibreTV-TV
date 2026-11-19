@@ -47,6 +47,8 @@ LibreTV-TV：在 LibreTV Next.js 迁移版基础上，增加 Android TV / 投影
 | App 电脑串流 | 8090 电脑串流服务 | 片源管理 → 填写电脑地址与配对码 → 电脑串流 |
 | 电脑浏览器 | 8080 Next.js 网页服务 | 浏览器打开 `http://localhost:8080` |
 
+Windows（NVIDIA 显卡）可双击 `start_windows.cmd` 同时启动网页服务与电脑串流服务，见[电脑串流说明](desktop-server/README.md#windows-运行)。
+
 详细实现与验证见 [Android TV 说明](android-tv/README.md)、[播放协议](android-tv/PLAYBACK_PROTOCOL.md)、[界面迁移记录](android-tv/NATIVE_UI_MIGRATION.md)及[电脑串流说明](desktop-server/README.md)。以下 Docker / 网页部署说明仍适用于网页端。
 
 ## 部署
@@ -233,6 +235,8 @@ kill "$(cat .desktop-server/server.pid)" # 停止该后台服务
 | `DEFAULT_LIVE_SOURCES` | 否 | 预置直播源（M3U 订阅），JSON 数组：`[{"name":"源名","url":"https://.../list.m3u","epg":"https://.../epg.xml.gz"}]`，`epg` 为可选的 XMLTV 节目单地址 |
 | `DEFAULT_SUBSCRIPTIONS` | 否 | 预置数据源订阅（LibreTV-SourceList JSON 链接，也接受 TVBOX 配置地址），JSON 数组：`["https://.../sources.json", {"url":"https://.../list.json","name":"名称"}]`。首次访问自动导入点播源与直播源，之后每 24h 静默刷新；用户删除后不再自动加回 |
 | `DEFAULT_RECOMMEND_SOURCE` | 否 | 首页推荐数据源的默认值（`douban` / `bangumi` / `hot-list`，出厂默认 `hot-list`）；仅对未在设置中主动选择过的用户生效，用户的选择始终优先 |
+| `DESKTOP_SERVER_URL` | 否 | 资料同步和「已下载」页面使用的电脑串流服务地址，默认 `http://127.0.0.1:8090`（与网页服务在同一台电脑） |
+| `DESKTOP_PAIRING_TOKEN` | 否 | 上述串流服务的配对码；未设置时读取运行目录下的 `.desktop-server/config.json`。两者都没有时网页端不启用资料同步 |
 | `LIVE_ALLOW_PRIVATE` | 否 | 设为 `1` 时允许直播流代理访问内网/保留地址（自建 IPTV 场景），默认关闭以维持 SSRF 防护 |
 
 ## 使用说明
@@ -242,6 +246,14 @@ kill "$(cat .desktop-server/server.pid)" # 停止该后台服务
 3. **播放**：详情弹窗选择剧集进入 `/watch`；支持快捷键（空格/←→/↑↓/F/Alt+←→）、移动端长按 3 倍速、自动连播、换源测速。观看/暂停时后续分片自动缓存到本地（设置可关），播放页可「下载本集」（TS/MP4）离线观看。
 4. **进度与历史**：自动保存在本设备 IndexedDB，仅定位信息入库，播放时自动同步最新剧集。
 5. **配置迁移**：设置 → 数据 → 配置导入导出（兼容旧版 LibreTV-Settings JSON 的历史记录迁移）。
+
+## 已下载（电脑片库）
+
+电脑上运行着串流服务时，顶栏会出现「已下载」。这里列出电视端选择「下载到电脑」后保存在电脑上的整集：可以看处理进度、直接在浏览器里播放、取消或删除。播放数据由网页服务转发（`/api/library`），浏览器不需要配对码；片源失效或断网后仍能观看。记住的播放位置只保存在当前浏览器。电视下载时如果选用了 HEVC 编码，需要支持 HEVC 的浏览器（Edge、Chrome、Safari）。
+
+## 界面风格
+
+网页与电视端 SuperTV 统一为黑白灰简约风格：深色主题为纯黑底、灰阶层次、白色强调；浅色主题为对应的白底黑字。颜色全部由 `src/app/globals.css` 里的变量控制。
 
 ## 直播 / IPTV
 

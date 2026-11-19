@@ -258,7 +258,7 @@ export default function TvPage() {
       <header className={styles.header}>
         <div>
           <span className={styles.eyebrow}>{standalone ? store.playbackMode === 'desktop' ? '电脑串流 · ANDROID TV' : '独立运行 · ANDROID TV' : 'TV MODE'}</span>
-          <h1>LibreTV</h1>
+          <h1>SuperTV</h1>
         </div>
         <div className={styles.sourceCount}>{sources.length} 个来源已启用
           {standalone && <button data-tv-focus type="button" className={styles.close} style={{ marginLeft: '2vw' }} onClick={() => setSettingsOpen(true)}>片源管理</button>}
