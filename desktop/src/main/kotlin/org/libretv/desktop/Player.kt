@@ -101,7 +101,9 @@ object Vlc {
         val dir = System.getProperty("compose.application.resources.dir")?.let { File(it, "vlc") }
         if (dir != null && LocalService.windows) {
             val cache = File(dir, "plugins/plugins.dat"); val gen = File(dir, "vlc-cache-gen.exe"); val core = File(dir, "libvlccore.dll")
-            if (gen.isFile && (!cache.isFile || cache.lastModified() < core.lastModified())) runCatching {
+            // 安装包里已带缓存；只有缓存缺失或过期、并且程序目录能写（比如手动复制的程序目录）时才重新生成
+            val writable = runCatching { File(dir, "plugins/.write-test").let { it.writeText(""); it.delete() } }.getOrDefault(false)
+            if (gen.isFile && writable && (!cache.isFile || cache.lastModified() < core.lastModified())) runCatching {
                 val p = ProcessBuilder(gen.path, File(dir, "plugins").path).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
                 p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS)
                 Startup.mark("VLC 插件缓存${if (cache.isFile) "已生成" else "生成失败"}")

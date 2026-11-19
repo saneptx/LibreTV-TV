@@ -43,7 +43,8 @@ adb -s 192.168.1.20:5555 install -r android-tv/app/build/outputs/apk/debug/app-d
 ```bash
 cd desktop
 ./gradlew run                   # 开发时运行
-./gradlew createDistributable   # Windows：build/compose/binaries/main/app/SuperTV/SuperTV.exe
+./gradlew createDistributable   # 程序目录（Windows：build/compose/binaries/main/app/SuperTV/SuperTV.exe）
+./gradlew packageMsi -PappVersion=1.0.0   # Windows 安装程序（build/compose/binaries/main/msi/）
 ```
 
 超分需要 NVIDIA 显卡；第一次使用在「设置 → 串流服务」里下载超分工具（FFmpeg 与模型）。电视要从局域网连接，Windows 防火墙需放行 TCP 8090。详见 [电脑端说明](desktop/README.md) 和 [串流服务说明](desktop-server/README.md)。
@@ -54,6 +55,17 @@ cd desktop
 ./android-tv/gradlew -p android-tv :core:test :app:testDebugUnitTest   # 数据层与安卓单元测试
 npm run desktop:test                                                    # 串流服务
 ```
+
+## 自动构建与发布
+
+GitHub Actions（[`.github/workflows/build.yml`](.github/workflows/build.yml)）：
+
+- 推送到 `main`、提 PR 时：跑测试，构建安卓 APK 和 Windows 安装程序（MSI），在这次运行的页面里可以下载。
+- 推送版本 tag 时（例如 `git tag v1.0.0 && git push origin v1.0.0`）：额外创建 GitHub Release，附上 `SuperTV-1.0.0.msi` 和 `SuperTV-1.0.0.apk`。版本号同时用作 APK 的版本和 MSI 的版本，要写成三段数字，主版本号在 1 到 255 之间。
+
+Windows 安装程序自带播放内核（VLC 3.0.x）和串流服务用的 Node.js（最新 LTS），构建时从官网下载并核对 SHA-256；VLC 插件缓存在构建时生成。安装到 `C:\Program Files\SuperTV`（可以自选目录），数据仍在 `%LOCALAPPDATA%\SuperTV`，新版本覆盖安装即可升级。
+
+安卓发布版的签名密钥放在仓库的 Secrets 里（Settings → Secrets and variables → Actions）：`ANDROID_KEYSTORE_BASE64`（密钥库文件的 base64）、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。必须一直用同一把密钥，已安装的设备才能覆盖升级；没有配置时，构建出的 APK 用临时密钥签名，不能覆盖安装已有的版本。本地构建发布版时用同名的环境变量（`SUPERTV_KEYSTORE` 指向密钥库文件），不提供则用本机的调试密钥。
 
 ## 片源与订阅
 

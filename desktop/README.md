@@ -12,12 +12,13 @@ Windows / macOS 桌面程序，界面和手机端、电视端同一套设计（�
 
 ## 构建
 
-需要 JDK 17。Windows 上还需要把 VLC 3.0.x（win64 压缩包）解压到仓库根目录的 `.desktop-tools/vlc`、把 node.exe 放到 `.desktop-tools/node`，构建时会打进程序。
+需要 JDK 17。Windows 上还需要把 VLC 3.0.x（win64 压缩包）解压到仓库根目录的 `.desktop-tools/vlc`、把 node.exe 放到 `.desktop-tools/node`，构建时会打进程序，并用 `vlc-cache-gen` 生成 VLC 插件缓存（安装到 Program Files 后程序目录不能写，缓存必须随包带上）。在 PowerShell 里传版本号要加引号（`"-PappVersion=1.0.0"`），否则会在小数点处被拆开。
 
 ```bash
 cd desktop
 ./gradlew run                    # 开发时直接运行（Mac 上把 VLC.app 放在 desktop/.vlc 下可以测试播放）
 ./gradlew createDistributable    # 生成程序目录（Windows：build/compose/binaries/main/app/SuperTV/SuperTV.exe）
+./gradlew packageMsi -PappVersion=1.0.0   # Windows 安装程序，装到 Program Files；正式发布由 GitHub Actions 构建
 ```
 
 `./gradlew snapshot -Pout=目录 -Psteps="home search:繁花 wait:8 shot:x play:小城良方 wait:15 move:600,400"` 不开窗口把页面渲染成图片，用来检查界面；`playsrc:片名|片源名|第几集` 按指定片源播放，`seek:秒`、`before-ad:first` 跳转。设置环境变量 `SUPERTV_DEBUG=1` 会输出数据层请求、广告段和播放事件。
