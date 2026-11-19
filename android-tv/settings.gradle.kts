@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "LibreTV-TV"
-include(":app")
+include(":app", ":core")

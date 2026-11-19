@@ -20,11 +20,8 @@ android {
         buildConfigField("String", "LIBRETV_URL", "\"${libreTvUrl.get()}\"")
     }
 
-    // aapt 默认忽略以 _ 开头的目录；Next 静态运行时放在 _next 中，必须保留。
-    androidResources {
-        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:CVS:thumbs.db:picasa.ini:*~"
-    }
-    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/web-assets"))
+    // 随包分发的内置片源表（仓库根目录的 source.json）
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/core-assets"))
 
     buildFeatures { buildConfig = true }
 
@@ -43,22 +40,17 @@ android {
 }
 
 dependencies {
+    implementation(project(":core"))
     // 保持与本项目的 compileSdk 35 / AGP 8.7 兼容。
     val media3Version = "1.8.1"
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
-    implementation("androidx.webkit:webkit:1.12.1")
     testImplementation("junit:junit:4.13.2")
 }
 
-// 界面随 APK 构建，不依赖开发机正在运行的 Next 服务。
-val bundleTvWeb by tasks.registering(Exec::class) {
-    workingDir(rootProject.projectDir.parentFile)
-    commandLine("node", "android-tv/scripts/build-web.mjs")
-    inputs.dir("../../src")
-    inputs.dir("../../public")
-    inputs.files("../../source.json", "../../package.json", "../../package-lock.json", "../../next.config.ts",
-        "../../tsconfig.json", "../../tailwind.config.ts", "../../postcss.config.mjs", "../scripts/build-web.mjs")
-    outputs.dir(layout.buildDirectory.dir("generated/web-assets"))
+// 内置片源表随 APK 分发；界面、播放器、数据层都是原生代码，不打包任何网页。
+val bundleSources by tasks.registering(Copy::class) {
+    from(rootProject.projectDir.parentFile.resolve("source.json")) { rename { "sources.json" } }
+    into(layout.buildDirectory.dir("generated/core-assets"))
 }
-tasks.named("preBuild").configure { dependsOn(bundleTvWeb) }
+tasks.named("preBuild").configure { dependsOn(bundleSources) }

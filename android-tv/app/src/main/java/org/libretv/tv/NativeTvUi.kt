@@ -30,7 +30,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 @UnstableApi
-internal class NativeTvUi(private val activity: Activity, private val backend: NativeBackendClient, private val player: NativePlayerHost, private val retryBoot: () -> Unit) {
+internal class NativeTvUi(private val activity: Activity, private val backend: org.libretv.tv.core.CoreBackend, private val player: NativePlayerHost, private val retryBoot: () -> Unit) {
     private val ui = TvWidgets(activity)
     private val main = Handler(Looper.getMainLooper())
     private val posters = TvPosterLoader()
@@ -398,6 +398,8 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
     }
     fun onBoot(event: JSONObject) {
         if (event.optString("event") == "fatal") { onBootError(event.optString("error")); return }
+        // 其他设备同步进来的修改：只刷新首页和片库，不重走开场
+        if (event.optString("event") == "library-changed") { if (ready) { applyHome(event.optJSONObject("value") ?: JSONObject()); refreshLibrary() }; return }
         ready = true; searchButton.isEnabled = true; search.showSoftInputOnFocus=false
         applyHome(event.optJSONObject("value") ?: JSONObject())
         refreshLibrary()
@@ -1364,7 +1366,12 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         fun edge(view: View): View { navButtons[settingsTab]?.let { view.nextFocusLeftId=it.id }; if(first==null) first=view; return view }
         fun style(view: View) {
             if(view is Button) { view.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(14).toFloat()); view.setPadding(ui.px(14),ui.px(8),ui.px(14),ui.px(8)) }
-            if(view is EditText) { view.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(15).toFloat()); view.setPadding(ui.px(18),0,ui.px(18),0) }
+            if(view is EditText) {
+                view.setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(15).toFloat()); view.setPadding(ui.px(18),0,ui.px(18),0)
+                // 选中时底色变白，文字和提示要跟着变深，否则看不清
+                view.setTextColor(android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused),intArrayOf()),intArrayOf(Color.rgb(18,18,20),ui.ink)))
+                view.setHintTextColor(android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused),intArrayOf()),intArrayOf(Color.rgb(110,110,115),ui.muted)))
+            }
             view.background=ui.focusedBackground(radius=14)
         }
         fun group(label: String) = pane.addView(ui.text(label,12,ui.muted).apply { letterSpacing=.1f; ui.fontWeight(this,600) },ui.margins(-1,-2).apply { topMargin=ui.px(if(pane.childCount==0) 4 else 18); bottomMargin=ui.px(8); leftMargin=ui.px(6) })
@@ -1380,8 +1387,24 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         fun sourcesStatus() = "已启用 ${config.optInt("enabled")} 个片源 · 确认键切换，自动保存"
         fun render(key: String) {
             settingsTab=key; navButtons.forEach { (k,button) -> button.isSelected=k==key }
+            if(key!="desktop") hubDiscovery.stop()
+            // 从右上角「完成」按下回到当前栏目，而不是跳到第一个栏目把内容换掉
+            navButtons[key]?.let { p.close.nextFocusDownId=it.id }
             pane.removeAllViews(); paneScroll.scrollTo(0,0); first=null; p.status.text=""
             when(key) {
+                "phones" -> {
+                    group("手机连接")
+                    note("在同一个 Wi-Fi 下打开手机上的 SuperTV，点右上角的电视图标就能找到这台电视；第一次连接时要在这里用遥控器确认。连上后可以同步观看记录和片库、把手机上的影片投到电视、遥控播放和代替遥控器打字。")
+                    val service=companionService
+                    if(service==null || service.port==0) note("手机连接服务没有启动（端口被占用），重新打开应用后再试。")
+                    else {
+                        row("这台电视",{ listOf(service.name,service.address().ifEmpty { "未连接网络" }+if(service.port!=TvCompanion.PORT) ":${service.port}" else "").joinToString(" · ") }) { done -> done() }
+                        note("手机上搜不到这台电视时，在手机的电视面板里手动填写上面的地址。")
+                        val phones=service.paired()
+                        group(if(phones.isEmpty()) "还没有手机连接过" else "已允许的手机（确认键移除）")
+                        phones.forEach { (device,label) -> row(label,{ "移除" }) { _ -> service.forget(device); toast("已移除「$label」"); render("phones"); pane.post { (first ?: navButtons["phones"])?.requestFocus() } } }
+                    }
+                }
                 "playback" -> {
                     group("播放方式")
                     row("播放模式",{ if(config.optString("playbackMode")=="desktop") "电脑串流" else "独立直连" }) { done ->
@@ -1398,27 +1421,76 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
                     note("处理能力以电脑服务的连接检测结果为准。")
                 }
                 "desktop" -> {
-                    group("电脑服务地址")
+                    val connected=config.optBoolean("desktopConfigured")
                     val server=ui.input("例如 http://192.168.1.10:8090").apply { setText(config.optString("desktopServerUrl")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }
-                    field(server)
-                    group("配对码")
-                    val pairing=ui.input("电脑服务启动时显示的配对码").apply { setText(config.optString("desktopPairingToken")); inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
-                    field(pairing)
+                    // 已连接时不显示保存着的长配对码（很长，也没必要看）；要换电脑就重新填 6 位配对码
+                    val pairing=ui.input(if(connected) "已连接 · 换电脑时填新的 6 位配对码" else "电脑服务窗口里显示的 6 位配对码").apply { inputType=InputType.TYPE_CLASS_NUMBER }
                     var connecting=false
-                    action(ui.button("保存并测试") {
-                        if (!connecting) {
-                            connecting=true; p.status.text="正在连接电脑服务…"
-                            val args=JSONObject().put("desktopServerUrl",server.text.toString()).put("desktopPairingToken",pairing.text.toString())
-                            backend.request("settings",args) { saved ->
-                                saved.optJSONObject("value")?.let { applyConfig(it) }
-                                backend.request("test-desktop",args) { event ->
-                                    connecting=false
-                                    p.status.text=if(event.optString("event")=="error") event.optString("error") else event.optString("value")
-                                }
+                    var shown=""   // 当前显示的电脑列表；置空可强制重画（连接成功后更新「已连接」标记）
+                    fun finish(event: JSONObject, message: String?) {
+                        connecting=false
+                        if(panel!==p || settingsTab!="desktop") return
+                        p.status.text=if(event.optString("event")=="error") event.optString("error") else message.orEmpty()
+                    }
+                    fun connect() {
+                        if(connecting) return
+                        val url=server.text.toString().trim().let { if(it.isNotEmpty() && !it.contains("://")) "http://$it" else it }.let { if(Regex("^https?://[^/:]+$").matches(it)) "$it:8090" else it }
+                        val code=pairing.text.toString().filter { !it.isWhitespace() }
+                        if(url.isEmpty()) { p.status.text="先选一台电脑，或填写电脑服务地址"; return }
+                        connecting=true; p.status.text="正在连接电脑服务…"
+                        when {
+                            Regex("\\d{6}").matches(code) -> backend.request("pair-desktop",JSONObject().put("url",url).put("pin",code)) { event ->
+                                event.optJSONObject("value")?.optJSONObject("config")?.let { applyConfig(it) }
+                                finish(event,event.optJSONObject("value")?.optString("message"))
+                                if(event.optString("event")=="result") { pairing.setText(""); pairing.hint="已连接 · 换电脑时填新的 6 位配对码"; shown="" }
                             }
+                            // 没填配对码：沿用已保存的长配对码，只换地址或重新检测
+                            code.isEmpty() && config.optString("desktopPairingToken").isNotEmpty() -> {
+                                val args=JSONObject().put("desktopServerUrl",url).put("desktopPairingToken",config.optString("desktopPairingToken"))
+                                backend.request("settings",args) { saved -> saved.optJSONObject("value")?.let { applyConfig(it) }; backend.request("test-desktop",args) { event -> finish(event,event.optString("value")) } }
+                            }
+                            // 旧办法仍然可用：直接粘贴 config.json 里的长配对码
+                            code.length>=24 -> {
+                                val args=JSONObject().put("desktopServerUrl",url).put("desktopPairingToken",code)
+                                backend.request("settings",args) { saved -> saved.optJSONObject("value")?.let { applyConfig(it) }; backend.request("test-desktop",args) { event -> finish(event,event.optString("value")) } }
+                            }
+                            else -> { connecting=false; p.status.text="配对码是电脑服务窗口里显示的 6 位数字" }
                         }
-                    })
-                    note("连上电脑服务后，观看记录、片库和搜索记录会在各设备间同步，还可以把影片交给电脑下载。")
+                    }
+                    group("局域网里的电脑")
+                    val found=ui.column(); pane.addView(found)
+                    fun renderFound() {
+                        if(panel!==p || settingsTab!="desktop") return
+                        val list=runCatching { JSONArray(hubDiscovery.list()).objects() }.getOrDefault(emptyList()).sortedBy { it.optString("name") }
+                        val key=list.joinToString("|") { it.optString("host")+":"+it.optInt("port") }
+                        if(key!=shown || found.childCount==0) {
+                            // 列表变化时焦点若在其中，重建后放回同一位置附近
+                            val hadFocus=found.findFocus()!=null
+                            shown=key; found.removeAllViews()
+                            if(list.isEmpty()) found.addView(ui.text("正在寻找…电脑上要先启动 SuperTV 电脑服务，并和电视连同一个网络。",12,ui.muted),ui.margins(-1,-2).apply { leftMargin=ui.px(6); bottomMargin=ui.px(6) })
+                            list.forEach { pc ->
+                                val address="http://${pc.optString("host")}:${pc.optInt("port")}"
+                                val current=config.optString("desktopServerUrl")==address && config.optBoolean("desktopConfigured")
+                                val item=ui.settingRow(pc.optString("name"),if(current) "已连接" else pc.optString("host")) {
+                                    server.setText(address); p.status.text="已选中「${pc.optString("name")}」，在下面填它窗口里显示的 6 位配对码"; pairing.requestFocus()
+                                }
+                                found.addView(edge(item.view),ui.margins(-1,46).apply { bottomMargin=ui.px(6) })
+                            }
+                            // 从左边导航按右，先到电脑列表（有的话），否则到配对码输入框
+                            val entry=(found.getChildAt(0)?.takeIf { it.isFocusable } ?: pairing).apply { if(id==View.NO_ID) id=View.generateViewId() }
+                            first=entry; navButtons.values.forEach { it.nextFocusRightId=entry.id }
+                            if(hadFocus) found.post { (found.getChildAt(0)?.takeIf { it.isFocusable } ?: navButtons["desktop"])?.requestFocus() }
+                        }
+                        main.postDelayed({ renderFound() },1500)
+                    }
+                    hubDiscovery.start(); renderFound()
+                    group("配对码")
+                    field(pairing)
+                    pairing.setOnEditorActionListener { _,_,_ -> connect(); true }
+                    action(ui.button(if(connected) "重新连接" else "连接") { connect() })
+                    note("配对码显示在电脑服务的窗口里，只在第一次连接时需要。连上后，观看记录、片库和搜索记录会在各设备间同步，电视还能用电脑去广告、超分。")
+                    group("手动填写地址（找不到电脑时）")
+                    field(server)
                 }
                 "sources" -> {
                     p.status.text=sourcesStatus()
@@ -1461,7 +1533,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
                         backend.request("sync-subscription",JSONObject().put("url",value.trim())) { event ->
                             busy=false; syncButtons.forEach { it.isEnabled=true }
                             if(event.optString("event")=="error") p.status.text=event.optString("error")
-                            else backend.request("config") { e -> e.optJSONObject("value")?.let { applyConfig(it); toast("订阅已同步"); if(panel===p && settingsTab=="subscriptions") { render("subscriptions"); p.status.text="订阅已同步" } } }
+                            else backend.request("config") { e -> e.optJSONObject("value")?.let { applyConfig(it); toast("订阅已同步"); if(panel===p && settingsTab=="subscriptions") { render("subscriptions"); p.status.text="订阅已同步"; pane.post { (first ?: navButtons["subscriptions"])?.requestFocus() } } } }
                         }
                     }
                     action(ui.button("同步订阅") { sync(subscription.text.toString()) }.also { syncButtons.add(it) })
@@ -1473,7 +1545,7 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
             }
             navButtons.values.forEach { it.nextFocusRightId=first?.id ?: View.NO_ID }
         }
-        listOf("playback" to "播放","desktop" to "电脑服务","sources" to "片源","add" to "添加片源","subscriptions" to "订阅").forEach { (key,label) ->
+        listOf("playback" to "播放","desktop" to "电脑服务","phones" to "手机","sources" to "片源","add" to "添加片源","subscriptions" to "订阅").forEach { (key,label) ->
             val button=ui.button(label) { render(key) }.apply {
                 background=ui.focusedBackground(Color.TRANSPARENT,14); gravity=Gravity.CENTER_VERTICAL or Gravity.LEFT
                 setTextSize(TypedValue.COMPLEX_UNIT_PX,ui.px(15).toFloat()); setPadding(ui.px(18),0,ui.px(18),0); nextFocusLeftId=id
@@ -1581,7 +1653,99 @@ internal class NativeTvUi(private val activity: Activity, private val backend: N
         if (code in setOf(19,20,21,22)) { if(event.action==KeyEvent.ACTION_DOWN) ui.moveFocus(home,code); return true }
         return false
     }
-    fun release() { hot.close(); backdrop.close(); backend.cancel(compareId); closeDesktopPlayback(); disposed=true; posters.close(); panel?.dialog?.dismiss(); main.removeCallbacksAndMessages(null) }
+    // —— 手机伴侣：同步、接力播放、遥控、代输入（见 TvCompanion）——
+    /** 在局域网里寻找电脑服务（设置里的「电脑服务」一栏打开时才开始找） */
+    private val hubDiscovery = TvDiscovery(activity.applicationContext, "_supertv-hub._tcp")
+    var companionService: TvCompanion? = null
+    private fun focusedInput(): EditText? = (panel?.dialog?.takeIf { it.isShowing }?.currentFocus ?: activity.currentFocus) as? EditText
+    val companion = object : TvCompanion.Handler {
+        override fun confirmPairing(name: String, decide: (Boolean) -> Unit) {
+            if (disposed) { decide(false); return }
+            var decided = false
+            fun settle(allowed: Boolean) { if (!decided) { decided = true; decide(allowed); if (allowed) toast("已允许「$name」连接") } }
+            // 自绘的确认框（黑白灰、与界面一致）：厂商自带的对话框样式各不相同，还会截断说明文字
+            val dialog = android.app.Dialog(activity, android.R.style.Theme_Material_Dialog_NoActionBar)
+            val allow = ui.button("允许") { settle(true); dialog.dismiss() }
+            val deny = ui.button("拒绝") { settle(false); dialog.dismiss() }
+            val box = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL; background = ui.background(Color.rgb(28, 28, 30), Color.argb(40, 255, 255, 255), 22)
+                setPadding(ui.px(34), ui.px(30), ui.px(34), ui.px(28))
+                addView(ui.text("允许这台手机连接？", 22, bold = true))
+                addView(ui.text("「$name」想连接这台电视。\n允许后，它可以同步观看记录和片库、把影片投到电视上播放、遥控播放，并代替遥控器打字。", 15, ui.muted).apply { setLineSpacing(ui.px(6).toFloat(), 1f) }, ui.margins(-1, -2).apply { topMargin = ui.px(14) })
+                addView(ui.row().apply {
+                    gravity = Gravity.END
+                    listOf(allow, deny).forEachIndexed { i, b -> b.setPadding(ui.px(30), 0, ui.px(30), 0); addView(b, ui.margins(-2, 46).apply { if (i > 0) leftMargin = ui.px(14) }) }
+                }, ui.margins(-1, -2).apply { topMargin = ui.px(26) })
+            }
+            dialog.setContentView(box, ViewGroup.LayoutParams(ui.px(520), ViewGroup.LayoutParams.WRAP_CONTENT))
+            dialog.window?.apply { setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)); setDimAmount(.7f) }
+            dialog.setOnCancelListener { settle(false) }
+            dialog.setOnDismissListener { settle(false) }
+            // 默认停在「拒绝」上：误按确认键不会放行
+            runCatching { dialog.show(); deny.requestFocus() }.onFailure { settle(false) }
+            main.postDelayed({ if (!decided && dialog.isShowing) dialog.dismiss() }, 60_000)
+        }
+        override fun sync(body: JSONObject, done: (JSONObject?) -> Unit) {
+            if (disposed) { done(null); return }
+            backend.request("peer-sync", body) { event -> when (event.optString("event")) { "result" -> done(event.optJSONObject("value")); "error" -> done(null) } }
+        }
+        override fun state(): JSONObject {
+            val input = focusedInput(); val a = active
+            val value = JSONObject().put("page", page).put("playing", a != null).put("loading", loadingPlayback)
+                .put("input", input != null).put("inputText", input?.text?.toString().orEmpty().take(500)).put("inputHint", input?.hint?.toString().orEmpty())
+            if (a != null) value.put("title", a.getJSONObject("item").optString("name")).put("index", a.optInt("index"))
+                .put("episodes", a.optJSONObject("detail")?.optJSONArray("episodes")?.length() ?: 0)
+                .put("position", state.optDouble("position", 0.0).takeIf { it.isFinite() } ?: 0.0).put("duration", state.optDouble("duration", 0.0).takeIf { it.isFinite() } ?: 0.0)
+                .put("paused", state.optBoolean("paused"))
+            return value
+        }
+        override fun cast(args: JSONObject): String? {
+            val key = args.optString("sourceKey"); val vod = args.optString("vodId")
+            if (key.isEmpty() || vod.isEmpty() || key.length > 200 || vod.length > 200) return "投屏内容无效"
+            if (disposed || config.length() == 0) return "电视还没有准备好"
+            if (loadingPlayback) return "电视正在打开另一部影片，请稍后再试"
+            val item = JSONObject().put("sourceKey", key).put("sourceUrl", args.optString("sourceUrl").take(2000)).put("sourceName", args.optString("sourceName").take(80).ifEmpty { sourceName(key) })
+                .put("vodId", vod).put("name", args.optString("title").take(200)).put("pic", args.optString("pic").take(2000))
+            val position = args.optDouble("position", 0.0).takeIf { it.isFinite() && it > 5 }
+            toast("来自手机：${item.optString("name")}")
+            openPlayback(item, args.optInt("index").coerceAtLeast(0), position)
+            return null
+        }
+        override fun control(action: String, value: Double): String? {
+            if (active == null || switching || loadingPlayback) return "电视没有在播放"
+            val length = state.optDouble("duration", 0.0); val now = state.optDouble("position", 0.0)
+            when (action) {
+                "toggle" -> command(if (state.optBoolean("paused")) "play" else "pause")
+                "play", "pause" -> command(action)
+                "seek", "seekTo" -> {
+                    if (!TvPlaybackRules.canSeek(length)) return "这部影片还不能快进"
+                    command("seek", JSONObject().put("position", (if (action == "seek") now + value else value).coerceIn(0.0, (length - 2).coerceAtLeast(0.0))))
+                }
+                "next" -> episode(1)
+                "prev" -> episode(-1)
+                "stop" -> { panel?.dialog?.dismiss(); exitPlayback(); return null }
+                else -> return "不支持的操作"
+            }
+            if (panel?.dialog?.isShowing != true && !loadingPlayback) showControls(true)
+            return null
+        }
+        override fun text(value: String, submit: Boolean): String? {
+            val input = focusedInput() ?: return "电视上没有选中输入框"
+            input.setText(value.filter { !it.isISOControl() }.take(500)); input.setSelection(input.text.length)
+            if (submit) input.onEditorAction((input.imeOptions and EditorInfo.IME_MASK_ACTION).takeIf { it != EditorInfo.IME_ACTION_UNSPECIFIED } ?: EditorInfo.IME_ACTION_DONE)
+            return null
+        }
+        override fun search(query: String): String? {
+            val text = query.filter { !it.isISOControl() }.trim().take(100)
+            if (text.isEmpty()) return "请输入要搜索的片名"
+            if (active != null || loadingPlayback) return "电视正在播放，先停止播放再搜索"
+            if (disposed || config.length() == 0) return "电视还没有准备好"
+            // 焦点落在搜索框上：原先聚焦的首页内容已经隐藏，而且手机可以接着改字
+            panel?.dialog?.dismiss(); searchFor(text); search.requestFocus()
+            return null
+        }
+    }
+    fun release() { hubDiscovery.stop(); hot.close(); backdrop.close(); backend.cancel(compareId); closeDesktopPlayback(); disposed=true; posters.close(); panel?.dialog?.dismiss(); main.removeCallbacksAndMessages(null) }
     /** 搜索结果进入详情页，相关推荐为同一次搜索的其他结果 */
     private fun openSearchDetail(card: JSONObject) = openDetail(card, "搜索结果", related = adapter.cards.filter { it !== card && !it.has("history") })
     private inner class MovieAdapter {

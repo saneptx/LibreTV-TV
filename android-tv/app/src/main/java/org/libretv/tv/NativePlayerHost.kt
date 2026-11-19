@@ -10,8 +10,6 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.TextureView
 import android.view.View
-import android.webkit.CookieManager
-import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -40,19 +38,16 @@ import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParserFactory
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.ParsingLoadable
-import androidx.webkit.WebViewCompat
-import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.util.ArrayDeque
 
-/** 原生视频在透明 WebView 下方；桥只对配置的服务 origin 的主框架开放。 */
+/** 原生播放器（Media3）：界面用 command() 下发加载、播放、定位等指令，状态经 onState 每半秒回报一次。 */
 @UnstableApi
-internal class NativePlayerHost(private val activity: Activity, private val web: WebView, server: String, private val onState: ((JSONObject) -> Unit)? = null) {
+internal class NativePlayerHost(private val activity: Activity, private val onState: (JSONObject) -> Unit) {
     val container = FrameLayout(activity).apply { setBackgroundColor(Color.BLACK) }
     private val texture = TextureView(activity).apply { isFocusable = false; visibility = View.INVISIBLE }
-    private val origin = Uri.parse(server).let { "${it.scheme}://${it.authority}" }
     private val handler = Handler(Looper.getMainLooper())
     private var player: ExoPlayer? = null
     private var id = ""
@@ -88,19 +83,10 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     init {
         container.addView(texture, FrameLayout.LayoutParams(-1, -1))
         texture.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> resize() }
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
-            WebViewCompat.addWebMessageListener(web, "LibreTvNativePlayer", setOf(origin)) { _, message, source, mainFrame, _ ->
-                if (mainFrame && sameOrigin(source)) {
-                    val body = message.data ?: return@addWebMessageListener
-                    web.post { runCatching { command(JSONObject(body)) }.onFailure { Log.w(TAG, "Invalid player command", it) } }
-                }
-            }
-        }
     }
 
-    private fun sameOrigin(uri: Uri) = Uri.parse(origin).let {
-        uri.scheme == it.scheme && uri.host == it.host && uri.port == it.port
-    }
+    /** 早期经网页服务转发的地址已不存在，保留判断以拒绝这类请求 */
+    private fun sameOrigin(uri: Uri) = false
     private fun http(value: String): Uri {
         val uri = Uri.parse(value)
         require(uri.scheme in listOf("http", "https") && !uri.host.isNullOrEmpty())
@@ -218,7 +204,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
     private fun prepare(url: String, position: Long, autoplay: Boolean) {
         val exo = player ?: return
         errorText = ""; rendered = false; currentUrl = url
-        val token = CookieManager.getInstance().getCookie(origin).orEmpty()
+        val token = ""
         val rawHeaders = request.optJSONObject("headers") ?: JSONObject()
         val headers = rawHeaders.keys().asSequence().filter { !it.equals("cookie", true) && !it.equals("host", true) }
             .associateWith { rawHeaders.optString(it) }
@@ -307,10 +293,7 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
             .put("renderedFrames",counters?.renderedOutputBufferCount ?: 0)
             .put("videoBitrate",exo.videoFormat?.bitrate ?: -1).put("timeMap", JSONArray().apply { timeMap.forEach { put(JSONObject().put("start", it.start).put("duration", it.duration)) } })
             .put("skips", skips.size).put("skipped", skipped)
-        if (onState != null) {
-            onState.invoke(body)
-            if (BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=$body;", null)
-        } else web.evaluateJavascript("window.dispatchEvent(new CustomEvent('libretv-native-player-state',{detail:$body}));", null)
+        onState(body)
     }
     fun pauseForLifecycle() { resumeAfterPause = player?.playWhenReady == true; player?.pause(); texture.keepScreenOn = false }
     fun resumeForLifecycle() { if (resumeAfterPause) player?.play(); resumeAfterPause = false }
@@ -322,11 +305,9 @@ internal class NativePlayerHost(private val activity: Activity, private val web:
         player = null; id = ""; resumeAfterPause = false; generation++; timeMap = emptyList(); pendingOriginal = null; skips = emptyList(); serverTimeMap = null
         previous?.release()
         texture.visibility = View.INVISIBLE; texture.keepScreenOn = false; videoSize = VideoSize.UNKNOWN; fit = "contain"; videoDecoder = ""
-        if(onState!=null && BuildConfig.DEBUG) web.evaluateJavascript("window.__libreTvNativePlayerState=null;",null)
     }
     fun release() {
         stop()
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) WebViewCompat.removeWebMessageListener(web, "LibreTvNativePlayer")
     }
 
     private class FilterParserFactory(private val enabled: Boolean, private val flagged: Set<String>, private val analyzed: Map<String, String>, private val onMedia: (List<PlaylistFilter.Removal>) -> Unit) : HlsPlaylistParserFactory {

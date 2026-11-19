@@ -133,7 +133,30 @@ internal class TvWidgets(val activity: Activity) {
             val box = boxes.getOrNull(from)
             focusAnchor = if (vertical && box != null) (if (box.width > scope.width * .5) box.x + px(60) else box.x + box.width / 2) else null
         }
-        val index = TvFocusRules.next(boxes, from, direction, px(8).toDouble(), focusAnchor)
+        // 上下移动先在当前所在的滚动区域里找（设置面板右栏的列表、详情页的长列表）：
+        // 旁边并排的另一栏里即使有更近的控件也不抢焦点，本栏到头了才看整个范围
+        var index = from
+        if (vertical && current != null) {
+            var pane: ViewGroup? = null; var parent = current.parent
+            while (parent is View && parent !== scope) { if (parent is ScrollView) { pane = parent; break }; parent = parent.parent }
+            if (pane != null) {
+                val inside = nodes.indices.filter { i -> var q = nodes[i].parent; var found = false; while (q is View) { if (q === pane) { found = true; break }; q = q.parent }; found }
+                if (inside.size > 1) {
+                    val local = TvFocusRules.next(inside.map { boxes[it] }, inside.indexOf(from), direction, px(8).toDouble(), focusAnchor)
+                    index = inside.getOrElse(local) { from }
+                }
+                if (index == from) {
+                    // 本栏到头了：只去正上方 / 正下方的控件（与本栏横向有重叠的，如面板右上角的按钮），
+                    // 不斜着跳进旁边并排的另一栏——那会让人莫名其妙换了栏目
+                    val xy = IntArray(2); pane.getLocationOnScreen(xy); val left = xy[0].toDouble(); val right = left + pane.width
+                    val aligned = nodes.indices.filter { i -> i == from || i !in inside && boxes[i].x < right && boxes[i].x + boxes[i].width > left }
+                    val outside = TvFocusRules.next(aligned.map { boxes[it] }, aligned.indexOf(from), direction, px(8).toDouble(), focusAnchor)
+                    nodes.getOrNull(aligned.getOrElse(outside) { from })?.let { if (it !== current) { it.requestFocus(); reveal(it); focusAnchorView = it } }
+                    return true
+                }
+            }
+        }
+        if (index == from) index = TvFocusRules.next(boxes, from, direction, px(8).toDouble(), focusAnchor)
         nodes.getOrNull(index)?.let { it.requestFocus(); reveal(it); focusAnchorView = if (vertical) it else null }
         return true
     }

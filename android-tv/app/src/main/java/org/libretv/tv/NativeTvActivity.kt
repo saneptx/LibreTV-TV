@@ -1,64 +1,35 @@
 package org.libretv.tv
 
-import android.annotation.SuppressLint
 import android.app.Activity
-import android.graphics.Color
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.media3.common.util.UnstableApi
+import org.libretv.tv.core.CoreBackend
 
-/** 原生电视界面；包内不可见的数据页只负责既有解析及持久化，不参与焦点或绘制。 */
+/** 电视 / 投影仪入口：界面、播放器、数据层全部是原生实现。 */
 @UnstableApi
 class NativeTvActivity : Activity() {
-    private lateinit var web: WebView
-    private lateinit var backend: NativeBackendClient
-    private lateinit var standalone: StandaloneHost
+    private lateinit var backend: CoreBackend
     private lateinit var player: NativePlayerHost
     private lateinit var screen: NativeTvUi
+    private var companion: TvCompanion? = null
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hideBars()
         window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-        val previous = getSharedPreferences("libretv_tv", MODE_PRIVATE).getString("server_url", null)
-        val origin = localPageOrigin(previous ?: BuildConfig.LIBRETV_URL)
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
-        web = WebView(this).apply {
-            setBackgroundColor(Color.TRANSPARENT); alpha = 0f
-            isFocusable = false; isFocusableInTouchMode = false
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-            settings.javaScriptEnabled = true; settings.domStorageEnabled = true
-            settings.mediaPlaybackRequiresUserGesture = false
-            settings.userAgentString = "${settings.userAgentString} LibreTV-AndroidTV/0.4"
-            webChromeClient = WebChromeClient()
-        }
-        standalone = StandaloneHost(this, web, origin)
-        backend = NativeBackendClient(web, origin) { if (::screen.isInitialized) screen.onBoot(it) }
-        player = NativePlayerHost(this, web, origin) { if (::screen.isInitialized) screen.onPlaybackState(it) }
-        screen = NativeTvUi(this, backend, player) { web.reload() }
-        web.webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? = standalone.intercept(request)
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) =
-                request.isForMainFrame && (!standalone.sameOrigin(request.url) || request.url.path != "/native-tv")
-            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
-                if (request.isForMainFrame) screen.onBootError("本地数据加载失败：${error.description}")
-            }
-        }
-        player.container.addView(web, FrameLayout.LayoutParams(1, 1))
+        backend = CoreBoot.open(this) { if (::screen.isInitialized) screen.onBoot(it) }
+        player = NativePlayerHost(this) { if (::screen.isInitialized) screen.onPlaybackState(it) }
+        screen = NativeTvUi(this, backend, player) { recreate() }
+        // 手机伴侣服务启动失败（端口占用等）不影响看片
+        companion = runCatching { TvCompanion(this, screen.companion) }.getOrNull()?.also { screen.companionService = it }
         player.container.addView(screen.view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         // 片头黑幕盖在界面层之上（界面层的焦点光晕画在它自己的 overlay 里，不能透出来）
         player.container.addView(screen.curtain, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(player.container)
-        web.loadUrl("$origin/native-tv")
         if (BuildConfig.DEBUG) android.util.Log.i("LibreTV", "hardware decoders ${DecoderCapabilities.json}")
     }
     private fun hideBars() {
@@ -71,21 +42,23 @@ class NativeTvActivity : Activity() {
     }
     override fun onResume() {
         super.onResume(); hideBars()
-        if (::web.isInitialized) web.onResume()
         if (::player.isInitialized) player.resumeForLifecycle()
     }
     override fun onPause() {
         if (::screen.isInitialized) screen.savePlayback()
         if (::player.isInitialized) player.pauseForLifecycle()
-        // 数据页必须完成退出时的 IndexedDB 写入，保持 JS 运行直到 onDestroy。
         super.onPause()
     }
+    override fun onStop() {
+        // 转入后台后随时可能被系统回收：把还没写盘的进度和设置落盘
+        if (::backend.isInitialized) org.libretv.tv.core.Pool.ops.execute { backend.flush() }
+        super.onStop()
+    }
     override fun onDestroy() {
+        companion?.release()
         if (::screen.isInitialized) screen.release()
         if (::player.isInitialized) player.release()
         if (::backend.isInitialized) backend.release()
-        if (::standalone.isInitialized) standalone.release()
-        if (::web.isInitialized) web.destroy()
         super.onDestroy()
     }
 }
