@@ -123,7 +123,7 @@ jobs:
 
           $v = $env:VLC_VERSION; $zip = "vlc-$v-win64.zip"; $base = "https://download.videolan.org/pub/videolan/vlc/$v/win64"
           Invoke-WebRequest "$base/$zip" -OutFile "$tmp\$zip"
-          $sum = ((Invoke-WebRequest "$base/$zip.sha256").Content -split '\s+')[0]
+          Invoke-WebRequest "$base/$zip.sha256" -OutFile "$tmp\$zip.sha256"; $sum = ((Get-Content "$tmp\$zip.sha256" -Raw) -split '\s+')[0]
           if ((Get-FileHash "$tmp\$zip" -Algorithm SHA256).Hash -ne $sum.ToUpper()) { throw "VLC 校验失败" }
           Expand-Archive "$tmp\$zip" $tmp
           Move-Item "$tmp\vlc-$v" "$tools\vlc"
