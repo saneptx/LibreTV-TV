@@ -1,13 +1,8 @@
 node_modules/
-.next/
-.next-simulator/
-out/
 .env
 .env*.local
 *.tsbuildinfo
-vitest-results.json
 *.log
-.start_local.pid
 
 # AI 工具产物（本机会话/缓存数据，不入库）
 .mimosa/
@@ -25,7 +20,6 @@ android-tv/app/build/
 android-tv/local.properties
 android-tv/.emulator.log
 
-android-tv/.web-build/
 .desktop-server/
 android-tv/.preview/
 android-tv/.emulator-phone.log

@@ -40,7 +40,7 @@ Android 通过 `libretv-native-player-state` CustomEvent 回传：position、dur
 
 ## 当前范围
 
-0.3.0 已将界面、搜索与详情迁入 APK，见 [独立运行说明](STANDALONE.md)。以下验证记录对应最初 0.2.0 原生播放阶段。原生播放器目前使用 Media3 自身的内存缓冲，尚未接入网页 CacheStorage 的分片预取/缓存，也未实现原生外挂字幕选择。4K/HDR、特定编码和 DRM 是否可播放仍取决于设备解码器与片源，需要分别验证。
+0.3.0 已将界面、搜索与详情迁入 APK。以下验证记录对应最初 0.2.0 原生播放阶段。原生播放器目前使用 Media3 自身的内存缓冲，尚未接入网页 CacheStorage 的分片预取/缓存，也未实现原生外挂字幕选择。4K/HDR、特定编码和 DRM 是否可播放仍取决于设备解码器与片源，需要分别验证。
 
 ## 验证记录
 
@@ -82,4 +82,4 @@ MainActivity 默认转交 NativeTvActivity，电视桌面、普通桌面和模�
 
 照片对应的是播放时的换源面板，而非首页片源管理。修复该面板来源增多时的绘制溢出：正文直接占用标题与页脚之间的剩余高度，左右栏独立滚动；左侧 ScrollView 启用裁切，根 overlay 上的焦点光晕也遵守启用裁切的滚动祖先边界。卡片内边距放在列表内容中，滚动请求额外保留焦点框空间，最后一项的底边不会被裁掉。刷新与返回按钮顶部对齐，右列及最后单个来源可向右进入对应切换/重试操作，左键返回原来源。
 
-`android-tv/scripts/check-source-layout.mjs` 在模拟器使用 37 个隔离来源、长名称与长错误文本，检查开头/末尾截图页脚间隔的像素、最后项完整可见、标题页脚固定、右侧重试可达以及浏览不触发播放。报告 `.desktop-server/source-layout-emulator.json`，修复前复现截图 `/tmp/libretv-many-sources-before.png`。模拟器替身结束自动清理，不修改来源或历史。
+当时用模拟器脚本（已随网页调试接口一起删除）在模拟器使用 37 个隔离来源、长名称与长错误文本，检查开头/末尾截图页脚间隔的像素、最后项完整可见、标题页脚固定、右侧重试可达以及浏览不触发播放。报告 `.desktop-server/source-layout-emulator.json`，修复前复现截图 `/tmp/libretv-many-sources-before.png`。模拟器替身结束自动清理，不修改来源或历史。
