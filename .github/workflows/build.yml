@@ -112,7 +112,7 @@ jobs:
           $tools = Join-Path $env:GITHUB_WORKSPACE '.desktop-tools'; $tmp = $env:RUNNER_TEMP
           New-Item -ItemType Directory -Force "$tools\node" | Out-Null
 
-          $node = (Invoke-RestMethod https://nodejs.org/dist/index.json | Where-Object { $_.lts } | Select-Object -First 1).version
+          $node = ((Invoke-RestMethod https://nodejs.org/dist/index.json) | Where-Object { $_.lts } | Select-Object -First 1).version
           $zip = "node-$node-win-x64.zip"
           Invoke-WebRequest "https://nodejs.org/dist/$node/$zip" -OutFile "$tmp\$zip"
           $sum = ((Invoke-WebRequest "https://nodejs.org/dist/$node/SHASUMS256.txt").Content -split "`n" | Where-Object { $_ -match " $([regex]::Escape($zip))$" }).Split(' ')[0]
